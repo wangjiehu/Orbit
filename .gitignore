@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.orbit/
+scratch_git_test/
+*.log

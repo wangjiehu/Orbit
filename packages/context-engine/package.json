@@ -1,0 +1,18 @@
+{
+  "name": "@orbit-ai/context-engine",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts"
+  },
+  "dependencies": {
+    "@orbit-ai/shared": "workspace:*",
+    "@orbit-ai/config": "workspace:*",
+    "@orbit-ai/tools": "workspace:*",
+    "@orbit-ai/model-providers": "workspace:*",
+    "fast-glob": "^3.3.2",
+    "zod": "^3.23.8"
+  }
+}

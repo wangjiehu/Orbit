@@ -1,0 +1,24 @@
+{
+  "name": "@orbit-ai/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "orbit": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts"
+  },
+  "dependencies": {
+    "@orbit-ai/shared": "workspace:*",
+    "@orbit-ai/config": "workspace:*",
+    "@orbit-ai/core": "workspace:*",
+    "@orbit-ai/tui": "workspace:*",
+    "@orbit-ai/model-providers": "workspace:*",
+    "@orbit-ai/context-engine": "workspace:*",
+    "picocolors": "^1.0.1",
+    "commander": "^12.1.0",
+    "fast-glob": "^3.3.2"
+  }
+}
