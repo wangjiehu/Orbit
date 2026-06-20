@@ -62,6 +62,12 @@ orbit --help
 
 ### 2. Configuration & Diagnostics
 
+Configure your API keys interactively and securely (keys are encrypted on disk using native system DPAPI or fallback AES-GCM):
+
+```bash
+orbit login
+```
+
 Run environment diagnostics to verify your local configuration and API keys:
 
 ```bash
