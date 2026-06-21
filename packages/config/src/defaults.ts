@@ -135,6 +135,7 @@ export const DEFAULT_CONFIG: OrbitConfig = {
     enabled: true,
     provider: "ollama",
     model: "qwen2.5-coder:1.5b",
+    debounceMs: 150,
   },
   tui: {
     mouse: true,
