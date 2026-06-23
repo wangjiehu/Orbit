@@ -523,22 +523,43 @@ export class FullscreenTui {
         return;
       }
 
-      const packageJsonStat = statSync(packageJsonPath);
-      let maxConfigMtime = packageJsonStat.mtimeMs;
-
+      // Find lockfiles
       const lockfiles = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"];
+      let maxLockfileMtime = 0;
+      let hasLockfile = false;
+
       for (const lf of lockfiles) {
         const lfPath = join(this.cwd, lf);
         if (existsSync(lfPath)) {
+          hasLockfile = true;
           const stat = statSync(lfPath);
-          if (stat.mtimeMs > maxConfigMtime) {
-            maxConfigMtime = stat.mtimeMs;
+          if (stat.mtimeMs > maxLockfileMtime) {
+            maxLockfileMtime = stat.mtimeMs;
           }
         }
       }
 
-      const nodeModulesStat = statSync(nodeModulesPath);
-      this.npmNeedsUpdate = maxConfigMtime > nodeModulesStat.mtimeMs;
+      // Determine what configuration time to check: check lockfiles if present, otherwise fallback to package.json
+      const configMtimeToCheck = hasLockfile
+        ? maxLockfileMtime
+        : statSync(packageJsonPath).mtimeMs;
+
+      // Determine the installation state time by checking state files updated on successful install
+      let maxInstallStateMtime = statSync(nodeModulesPath).mtimeMs;
+      const stateFiles = [
+        join(nodeModulesPath, ".modules.yaml"), // pnpm
+        join(nodeModulesPath, ".package-lock.json"), // npm
+      ];
+      for (const sf of stateFiles) {
+        if (existsSync(sf)) {
+          const stat = statSync(sf);
+          if (stat.mtimeMs > maxInstallStateMtime) {
+            maxInstallStateMtime = stat.mtimeMs;
+          }
+        }
+      }
+
+      this.npmNeedsUpdate = configMtimeToCheck > maxInstallStateMtime;
     } catch {
       this.npmNeedsUpdate = false;
     } finally {
