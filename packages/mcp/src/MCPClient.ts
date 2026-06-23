@@ -1,7 +1,7 @@
 import { spawn, ChildProcess } from "child_process";
 import readline from "readline";
-import { ToolRisk } from "@orbit-ai/shared";
-import { OrbitTool, ToolResult, ToolContext } from "@orbit-ai/tools";
+import { ToolRisk } from "@orbit-build/shared";
+import { OrbitTool, ToolResult, ToolContext } from "@orbit-build/tools";
 import { z } from "zod";
 
 export interface MCPToolDefinition {

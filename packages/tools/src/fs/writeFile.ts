@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { writeFileSync, mkdirSync } from "fs";
 import { dirname } from "path";
-import { resolveSafePath } from "@orbit-ai/shared";
+import { resolveSafePath } from "@orbit-build/shared";
 import { OrbitTool, ToolContext, ToolResult } from "../types.js";
 
 export const WriteFileInputSchema = z.object({

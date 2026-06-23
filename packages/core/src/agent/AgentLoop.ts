@@ -1,20 +1,20 @@
-import { OrbitConfig } from "@orbit-ai/config";
+import { OrbitConfig } from "@orbit-build/config";
 import {
   ModelProvider,
   OrbitMessage,
   OrbitContentBlock,
   OrbitToolCall,
-} from "@orbit-ai/model-providers";
-import { PermissionEngine } from "@orbit-ai/permissions";
-import { CheckpointManager, RollbackManager } from "@orbit-ai/sandbox";
+} from "@orbit-build/model-providers";
+import { PermissionEngine } from "@orbit-build/permissions";
+import { CheckpointManager, RollbackManager } from "@orbit-build/sandbox";
 import {
   ContextPackBuilder,
   SymbolIndexer,
   ContextPack,
-} from "@orbit-ai/context-engine";
-import { SessionManager, Session } from "@orbit-ai/session";
-import { toolRegistry } from "@orbit-ai/tools";
-import { StatusBar, Prompt, Renderer } from "@orbit-ai/tui";
+} from "@orbit-build/context-engine";
+import { SessionManager, Session } from "@orbit-build/session";
+import { toolRegistry } from "@orbit-build/tools";
+import { StatusBar, Prompt, Renderer } from "@orbit-build/tui";
 import { AgentState, createInitialState } from "./AgentState.js";
 import { z } from "zod";
 import { MessageBuilder } from "./MessageBuilder.js";
@@ -24,11 +24,12 @@ import { eventBus } from "../events/EventBus.js";
 import picocolors from "picocolors";
 import path from "path";
 import fs from "fs";
+import { createHash } from "crypto";
 import { exec } from "child_process";
 import { promisify } from "util";
 const execPromise = promisify(exec);
-import { MCPClient, DynamicMCPTool } from "@orbit-ai/mcp";
-import { resolveSafePath } from "@orbit-ai/shared";
+import { MCPClient, DynamicMCPTool } from "@orbit-build/mcp";
+import { resolveSafePath } from "@orbit-build/shared";
 import { VerificationContractManager } from "../verification/VerificationContractManager.js";
 
 export interface UserInteraction {
@@ -43,7 +44,7 @@ export interface UserInteraction {
 
 export class AgentLoop {
   private state: AgentState;
-  private sessionManager: SessionManager;
+  public sessionManager: SessionManager;
   private checkpointManager: CheckpointManager;
   private rollbackManager: RollbackManager;
   private permissionEngine: PermissionEngine;
@@ -62,6 +63,8 @@ export class AgentLoop {
   private lastSymbolsMtime = 0;
   private cachedContextPack: ContextPack | null = null;
   private cachedRepoMapTextForRun: string | null = null;
+  private activeModelForRun: string | null = null;
+  private userId: string;
   private keepaliveTimer: NodeJS.Timeout | null = null;
   private lastChatParams: {
     model: string;
@@ -85,6 +88,7 @@ export class AgentLoop {
   ) {
     this.statusBar = new StatusBar(!!this.options?.disableStatusBar);
     this.sessionManager = new SessionManager(cwd);
+    this.userId = createHash("sha256").update(cwd).digest("hex");
 
     let session;
     if (options?.sessionId) {
@@ -95,6 +99,11 @@ export class AgentLoop {
         provider.id,
         options?.modelOverride || config.models.default,
       );
+    } else {
+      this.sessionCost = session.totalCostEstimate || 0;
+      this.totalInputTokens = session.totalInputTokens || 0;
+      this.totalOutputTokens = session.totalOutputTokens || 0;
+      this.totalCacheReadTokens = session.totalCacheReadTokens || 0;
     }
 
     this.state = createInitialState(session.id, task);
@@ -141,6 +150,7 @@ export class AgentLoop {
       });
       this.cachedContextPack = null;
       this.cachedRepoMapTextForRun = null;
+      this.activeModelForRun = null;
       this.sessionManager.saveHistory(this.state.history);
 
       // Start workspace symbol indexing in the background asynchronously
@@ -226,10 +236,10 @@ export class AgentLoop {
           !this.state.done &&
           this.state.attemptCount < this.state.maxAttempts
         ) {
-          // Auto-compact dialogue history if length exceeds 20
+          // Auto-compact dialogue history if length exceeds 40
           if (
             this.config.context.autoCompact &&
-            this.state.history.length > 20
+            this.state.history.length > 40
           ) {
             this.interaction.showText(
               "● Dialogue history is too long. Auto-compacting older history to save tokens...",
@@ -336,24 +346,34 @@ export class AgentLoop {
               .join("\n") || this.state.task
           ).toLowerCase();
 
+          // Heuristic task classification: High complexity vs Trivial
+          const highComplexityKeywords = [
+            "debug", "investigate", "root cause", "why does", "race condition",
+            "architecture", "refactor", "migrate", "design", "tradeoff", "optimize",
+            "security", "vulnerability", "concurrency", "deadlock", "memory leak",
+            "reason", "think", "explain why", "diagnose", "trace", "why does",
+            "what's wrong", "compare", "evaluate", "assess", "decide", "choose",
+            "推理", "分析", "诊断", "调试", "设计", "评估", "原因", "为什么", "调查",
+            "死锁", "内存泄漏", "并发", "优化", "重构", "安全", "漏洞", "架构",
+            "异常", "报错", "崩溃", "故障"
+          ];
+
+          const trivialKeywords = [
+            "what is", "list", "show", "echo", "print", "rename", "lint", "format",
+            "ty", "thanks", "yes", "no", "ok", "continue", "search", "find",
+            "什么是", "列出", "显示", "输出", "打印", "重命名", "格式化", "谢谢",
+            "继续", "是", "否", "好的"
+          ];
+
           const isComplexTask =
             isRepairTurn ||
-            userQueryText.includes("debug") ||
-            userQueryText.includes("architect") ||
-            userQueryText.includes("security") ||
-            userQueryText.includes("vulnerability") ||
-            userQueryText.includes("refactor") ||
-            userQueryText.includes("optimize") ||
-            userQueryText.includes("review");
+            highComplexityKeywords.some((kw) => userQueryText.includes(kw));
 
           const isSimpleTask =
             !isRepairTurn &&
-            (userQueryText.includes("what is") ||
-              userQueryText.includes("list") ||
-              userQueryText.includes("show") ||
-              userQueryText.includes("search") ||
-              userQueryText.includes("find") ||
-              userQueryText.length < 50);
+            (trivialKeywords.some((kw) => userQueryText.includes(kw)) ||
+              userQueryText.length < 50) &&
+            !highComplexityKeywords.some((kw) => userQueryText.includes(kw));
 
           // Check if the user request has tool execution or is complex
           const hasWrittenFiles = this.state.history.some(
@@ -369,33 +389,53 @@ export class AgentLoop {
 
           if (this.options?.modelOverride) {
             nextModel = this.options.modelOverride;
-          } else if (isComplexTask) {
-            nextModel = this.config.models.default;
-          } else if (isSimpleTask && this.config.models.fast) {
-            nextModel = this.config.models.fast;
           } else {
-            if (!hasWrittenFiles && this.config.models.fast) {
-              nextModel = this.config.models.fast;
+            if (!this.activeModelForRun) {
+              if (isComplexTask) {
+                nextModel = this.config.models.default;
+              } else if (isSimpleTask && this.config.models.fast) {
+                nextModel = this.config.models.fast;
+              } else {
+                if (!hasWrittenFiles && this.config.models.fast) {
+                  nextModel = this.config.models.fast;
+                } else {
+                  nextModel = this.config.models.default;
+                }
+              }
+              this.activeModelForRun = nextModel;
             } else {
-              nextModel = this.config.models.default;
+              if (
+                this.activeModelForRun === this.config.models.fast &&
+                this.config.models.default
+              ) {
+                if (isComplexTask || hasWrittenFiles) {
+                  this.activeModelForRun = this.config.models.default;
+                }
+              }
+              nextModel = this.activeModelForRun;
             }
           }
 
           const activeModel = nextModel;
           if (!this.cachedContextPack) {
-            const mentionQuery =
-              this.state.history
-                .filter((m) => m.role === "user")
-                .map((m) =>
-                  m.content
-                    .filter((b) => b.type === "text")
-                    .map((b: any) => b.text)
-                    .join("\n"),
-                )
-                .join("\n") || this.state.task;
+            // Find the initiating user message of the current turn (the last user message in history)
+            let latestUserQuery = this.state.task;
+            for (let i = this.state.history.length - 1; i >= 0; i--) {
+              if (this.state.history[i].role === "user") {
+                const text = this.state.history[i].content
+                  .filter((b) => b.type === "text")
+                  .map((b: any) => b.text)
+                  .join("\n");
+                if (text.trim()) {
+                  latestUserQuery = text;
+                  break;
+                }
+              }
+            }
+
             this.cachedContextPack = await this.contextBuilder.build(
               this.state.relevantFiles,
-              mentionQuery,
+              latestUserQuery,
             );
           }
           let toolDefs = toolRegistry.getDefinitions();
@@ -406,10 +446,15 @@ export class AgentLoop {
           }
           toolDefs.sort((a, b) => a.name.localeCompare(b.name));
 
+          // System prompt layering for optimal DeepSeek prefix cache:
+          // Layer 1 (stable across turns): core rules + tool schemas
+          // Layer 2 (semi-stable): repo map (cached by mtime)
+          // Layer 3 (dynamic): RAG context + file excerpts (in MessageBuilder)
           let systemPrompt =
             (this.options?.systemPromptOverride ||
-              Planner.makeSystemPrompt(activeModel)) + repoMapText;
+              Planner.makeSystemPrompt(activeModel));
           systemPrompt += generateXMLToolsPrompt(toolDefs);
+          systemPrompt += repoMapText;
 
           const contextPack = this.cachedContextPack;
           const { system, messages } = MessageBuilder.build(
@@ -424,7 +469,7 @@ export class AgentLoop {
               streaming: true,
               toolCalls: true,
               jsonMode: true,
-              thinking: activeModel.toLowerCase().includes("reasoner") || activeModel.toLowerCase().includes("r1") || activeModel.toLowerCase().includes("v4"),
+              thinking: activeModel.toLowerCase().includes("reasoner") || activeModel.toLowerCase().includes("r1") || activeModel.toLowerCase().includes("v4-pro"),
               vision: false,
               promptCaching: true,
             };
@@ -437,10 +482,12 @@ export class AgentLoop {
 
           this.abortController = new AbortController();
 
-          // 2. Dynamic thinking budget configuration
+          // 2. Dynamic thinking budget configuration based on complexity
           let thinkingBudget = 1024;
-          if (isRepairTurn || isComplexTask) {
-            thinkingBudget = 4096;
+          if (isRepairTurn) {
+            thinkingBudget = 8192; // Max thinking budget for repair
+          } else if (isComplexTask) {
+            thinkingBudget = 4096; // Standard high thinking budget
           }
 
           this.stopKeepaliveTimer();
@@ -586,6 +633,7 @@ export class AgentLoop {
             role: "assistant",
             createdAt: new Date().toISOString(),
             content: assistantBlocks,
+            metadata: { model: activeModel },
           };
           this.state.history.push(assistantMsg);
           this.sessionManager.saveHistory(this.state.history);
@@ -2087,10 +2135,10 @@ ${errLog}`;
 
     this.checkpointManager = new CheckpointManager(this.cwd, sessionId);
     this.stepRunner = new StepRunner(this.cwd, sessionId);
-    this.sessionCost = 0;
-    this.totalInputTokens = 0;
-    this.totalCacheReadTokens = 0;
-    this.totalOutputTokens = 0;
+    this.sessionCost = session.totalCostEstimate || 0;
+    this.totalInputTokens = session.totalInputTokens || 0;
+    this.totalCacheReadTokens = session.totalCacheReadTokens || 0;
+    this.totalOutputTokens = session.totalOutputTokens || 0;
     return true;
   }
 
@@ -2120,6 +2168,18 @@ ${errLog}`;
 
   public getSessionCost(): number {
     return this.sessionCost;
+  }
+
+  public getTotalInputTokens(): number {
+    return this.totalInputTokens;
+  }
+
+  public getTotalCacheReadTokens(): number {
+    return this.totalCacheReadTokens;
+  }
+
+  public getTotalOutputTokens(): number {
+    return this.totalOutputTokens;
   }
 
   public getConfig(): OrbitConfig {
@@ -2249,11 +2309,11 @@ ${errLog}`;
   }
 
   private accumulateCost(model: string, usage: any) {
-    const cleanModel = model.replace(/\[1m\]/g, "");
+    const cleanModel = model.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
     let pricing = this.config.pricing?.[cleanModel];
     if (!pricing) {
       for (const key of Object.keys(this.config.pricing || {})) {
-        if (key.replace(/\[1m\]/g, "") === cleanModel) {
+        if (key.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "") === cleanModel) {
           pricing = this.config.pricing[key];
           break;
         }
@@ -2285,6 +2345,15 @@ ${errLog}`;
     const turnCost = inputCost + outputCost + cacheReadCost;
     this.sessionCost += turnCost;
 
+    const session = this.sessionManager.getActiveSession();
+    if (session) {
+      session.totalInputTokens = this.totalInputTokens;
+      session.totalOutputTokens = this.totalOutputTokens;
+      session.totalCacheReadTokens = this.totalCacheReadTokens;
+      session.totalCostEstimate = this.sessionCost;
+      this.sessionManager.getSessionStore().updateSession(session);
+    }
+
     eventBus.emitEvent("cost_update", {
       turnCost,
       sessionCost: this.sessionCost,
@@ -2294,108 +2363,94 @@ ${errLog}`;
     });
   }
 
+  /**
+   * Cache-aware two-phase history compaction.
+   *
+   * Phase 1 (cache-friendly, triggers at >40 messages):
+   *   Truncates bulky tool_result and tool-role text content in older messages.
+   *   Preserves the message structure so the DeepSeek prompt prefix cache stays valid.
+   *
+   * Phase 2 (aggressive, triggers at >80 messages):
+   *   Drops the oldest messages entirely to prevent context window overflow.
+   *   This breaks the prefix cache but is necessary as a safety valve.
+   *   Only fires when Phase 1 alone isn't enough to keep history bounded.
+   */
   private async autoCompactHistory(): Promise<void> {
     const history = this.state.history;
-    if (history.length <= 12) return;
+    if (history.length <= 20) return;
 
-    const systemMsg = history[0];
-    let partitionIdx = history.length - 10;
-    while (partitionIdx > 1) {
-      const msg = history[partitionIdx];
-      if (msg.role === "tool") {
-        partitionIdx--;
-        continue;
-      }
-      const prevMsg = history[partitionIdx - 1];
-      const hasToolCalls = prevMsg.content.some(
-        (c: any) => c.type === "tool_call",
-      );
-      if (prevMsg.role === "assistant" && hasToolCalls) {
-        partitionIdx--;
-        continue;
-      }
-      break;
-    }
-    const discarded = history.slice(1, partitionIdx);
-    const recentMsgs = history.slice(partitionIdx);
+    // --- Phase 1: Cache-friendly truncation ---
+    // Keep the most recent 16 messages untouched (active working set)
+    const protectedTailSize = 16;
+    const compactBoundary = Math.max(0, history.length - protectedTailSize);
+    const maxToolResultLen = 300;
+    let truncatedCount = 0;
 
-    let rawText = "";
-    for (const msg of discarded) {
-      rawText +=
-        `[${msg.role.toUpperCase()}]: ` +
-        msg.content
-          .map((c) => {
-            if (c.type === "text") return c.text;
-            if (c.type === "tool_call")
-              return `[Tool Call: ${c.toolCall?.name}]`;
-            if (c.type === "tool_result")
-              return `[Tool Result: ${c.toolResult?.name}]`;
-            return "";
-          })
-          .join(" ") +
-        "\n";
-    }
-
-    let summaryText = "Prior dialogue history compacted.";
-    try {
-      const fastModel = this.config.models.fast || this.config.models.default;
-      const stream = this.provider.chat({
-        model: fastModel,
-        messages: [
-          {
-            id: `msg_compact_${Date.now()}`,
-            role: "user",
-            createdAt: new Date().toISOString(),
-            content: [
-              {
-                type: "text",
-                text: `Summarize the following dialog history of an AI coding session in a brief, concise paragraph (max 150 words). Focus on what files were modified, what tasks were accomplished, and any critical developer rules established. Do not include introductory text, just the summary:\n\n${rawText.substring(0, 15000)}`,
-              },
-            ],
-          },
-        ],
-        tools: [],
-      });
-
-      let responseContent = "";
-      for await (const event of stream) {
-        if (event.type === "text_delta") {
-          responseContent += event.text;
+    for (let i = 0; i < compactBoundary; i++) {
+      const msg = history[i];
+      for (const block of msg.content) {
+        if (block.type === "tool_result") {
+          const tr = (block as any).toolResult;
+          if (tr && typeof tr.content === "string" && tr.content.length > maxToolResultLen) {
+            tr.content = tr.content.substring(0, maxToolResultLen) + "\n... [truncated]";
+            truncatedCount++;
+          }
+        }
+        if (block.type === "text" && msg.role === "tool") {
+          const textBlock = block as any;
+          if (typeof textBlock.text === "string" && textBlock.text.length > maxToolResultLen) {
+            textBlock.text = textBlock.text.substring(0, maxToolResultLen) + "\n... [truncated]";
+            truncatedCount++;
+          }
         }
       }
-      if (responseContent.trim()) {
-        summaryText = responseContent.trim();
+    }
+
+    // --- Phase 2: Aggressive drop (safety valve for context window) ---
+    const hardMaxMessages = 80;
+    let droppedCount = 0;
+
+    if (history.length > hardMaxMessages) {
+      // Find a safe cut point: keep history[0] (may be system) + recent messages
+      const keepRecent = 30;
+      let cutIdx = history.length - keepRecent;
+
+      // Don't cut in the middle of a tool_call → tool_result pair
+      while (cutIdx > 1) {
+        const msg = history[cutIdx];
+        if (msg.role === "tool") {
+          cutIdx--;
+          continue;
+        }
+        const prevMsg = history[cutIdx - 1];
+        if (prevMsg.role === "assistant" && prevMsg.content.some((c: any) => c.type === "tool_call")) {
+          cutIdx--;
+          continue;
+        }
+        break;
       }
-    } catch (err: any) {
+
+      if (cutIdx > 1) {
+        droppedCount = cutIdx - 1;
+        const kept = [history[0], ...history.slice(cutIdx)];
+        this.state.history.length = 0;
+        this.state.history.push(...kept);
+      }
+    }
+
+    if (truncatedCount > 0 || droppedCount > 0) {
+      this.sessionManager.saveHistory(this.state.history);
+    }
+
+    if (droppedCount > 0) {
       this.interaction.showText(
-        `⚠ Auto-compactor LLM query failed: ${err.message}. Using default summary.`,
+        `✔ History compaction: truncated ${truncatedCount} tool outputs, dropped ${droppedCount} oldest messages (${this.state.history.length} remaining).`,
+      );
+    } else if (truncatedCount > 0) {
+      this.interaction.showText(
+        `✔ Cache-aware compaction: truncated ${truncatedCount} bulky tool outputs (preserved ${history.length} messages for prefix cache stability).`,
       );
     }
-
-    const summaryMsg: OrbitMessage = {
-      id: `msg_summary_${Date.now()}`,
-      role: "system",
-      createdAt: new Date().toISOString(),
-      content: [
-        {
-          type: "text",
-          text: `Prior session history summary:\n${summaryText}`,
-        },
-      ],
-    };
-
-    const newHistory: OrbitMessage[] = [];
-    if (systemMsg) {
-      newHistory.push(systemMsg);
-    }
-    newHistory.push(summaryMsg);
-    newHistory.push(...recentMsgs);
-    this.state.history = newHistory;
-    this.sessionManager.saveHistory(this.state.history);
-
-    this.interaction.showText(
-      `✔ Dialogue history auto-compacted! Compaction reduced history to ${this.state.history.length} messages.`,
-    );
   }
 
   private async promptSchemaGuided(

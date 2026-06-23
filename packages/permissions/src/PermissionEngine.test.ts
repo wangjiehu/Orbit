@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { PermissionEngine } from "./PermissionEngine.js";
-import { OrbitConfig } from "@orbit-ai/config";
+import { OrbitConfig } from "@orbit-build/config";
 
 const mockConfig = (
   mode: "strict" | "normal" | "auto" | "plan",

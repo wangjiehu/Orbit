@@ -1,4 +1,4 @@
-import { DetectProjectTool, ProjectIndex } from "@orbit-ai/tools";
+import { DetectProjectTool, ProjectIndex } from "@orbit-build/tools";
 
 export class ProjectIndexer {
   constructor(private cwd: string) {}

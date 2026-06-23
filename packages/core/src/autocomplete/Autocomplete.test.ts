@@ -3,12 +3,12 @@ import { AutocompleteEngine } from "./Autocomplete.js";
 import {
   DeepSeekOpenAIProvider,
   OllamaProvider,
-} from "@orbit-ai/model-providers";
+} from "@orbit-build/model-providers";
 
 let mockLastPrompt = "";
 
 // Mock model providers complete API
-vi.mock("@orbit-ai/model-providers", async (importOriginal) => {
+vi.mock("@orbit-build/model-providers", async (importOriginal) => {
   const original: any = await importOriginal();
 
   class MockDeepSeekProvider {

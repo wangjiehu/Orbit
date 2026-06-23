@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { tmpdir } from "os";
 import { VerificationContractManager } from "./VerificationContractManager.js";
-import { CheckpointManager } from "@orbit-ai/sandbox";
+import { CheckpointManager } from "@orbit-build/sandbox";
 import { execSync } from "child_process";
 
 describe("VerificationContractManager Tests", () => {

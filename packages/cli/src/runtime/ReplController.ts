@@ -4,14 +4,14 @@ import {
   Orchestrator,
   eventBus,
   AutocompleteEngine,
-} from "@orbit-ai/core";
-import { Prompt, Renderer } from "@orbit-ai/tui";
+} from "@orbit-build/core";
+import { Prompt, Renderer, DiffView } from "@orbit-build/tui";
 import picocolors from "picocolors";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, watch } from "fs";
 import { join, dirname, resolve } from "path";
 import { homedir } from "os";
 import http from "http";
-import { SymbolIndexer } from "@orbit-ai/context-engine";
+import { SymbolIndexer } from "@orbit-build/context-engine";
 import { FullscreenTui, pageText } from "../tui/FullscreenTui.js";
 import { CommandRouter, getAutocompleteCandidates } from "./CommandRouter.js";
 
@@ -195,6 +195,12 @@ export class ReplController {
 
     if (resumeSessionId && useFullscreenTui) {
       tui.loadHistory(loop.getHistory());
+      tui.setCost(
+        loop.getSessionCost(),
+        loop.getTotalInputTokens(),
+        loop.getTotalCacheReadTokens(),
+        loop.getTotalOutputTokens(),
+      );
     }
 
     tui.setModelNameGetter(

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { AgentLoop } from "./AgentLoop.js";
-import { OrbitConfig } from "@orbit-ai/config";
-import { ModelProvider } from "@orbit-ai/model-providers";
+import { OrbitConfig } from "@orbit-build/config";
+import { ModelProvider } from "@orbit-build/model-providers";
 
 describe("AgentLoop Hooks System", () => {
   const dummyConfig: OrbitConfig = {

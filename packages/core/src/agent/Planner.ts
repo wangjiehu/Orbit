@@ -1,6 +1,6 @@
 export class Planner {
   public static makeSystemPrompt(modelName = "DeepSeek"): string {
-    const cleanModel = modelName.replace(/\[1m\]/g, "");
+    const cleanModel = modelName.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
     let providerName = "DeepSeek";
 
     if (cleanModel.toLowerCase().includes("claude")) {

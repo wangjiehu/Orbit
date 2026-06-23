@@ -46,12 +46,12 @@ export const ConfigSchema = z.object({
     .default({}),
   models: z
     .object({
-      default: z.string().default("deepseek-chat"),
-      fast: z.string().default("deepseek-chat"),
-      planner: z.string().default("deepseek-chat"),
-      coder: z.string().default("deepseek-chat"),
-      reviewer: z.string().default("deepseek-chat"),
-      summarizer: z.string().default("deepseek-chat"),
+      default: z.string().default("deepseek-v4-flash"),
+      fast: z.string().default("deepseek-v4-flash"),
+      planner: z.string().default("deepseek-v4-pro"),
+      coder: z.string().default("deepseek-v4-pro"),
+      reviewer: z.string().default("deepseek-v4-pro"),
+      summarizer: z.string().default("deepseek-v4-flash"),
       embedding: z.string().default("text-embedding-3-small"),
     })
     .default({}),

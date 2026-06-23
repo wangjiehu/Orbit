@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Orchestrator } from "./Orchestrator.js";
-import { OrbitConfig } from "@orbit-ai/config";
-import { ModelProvider } from "@orbit-ai/model-providers";
+import { OrbitConfig } from "@orbit-build/config";
+import { ModelProvider } from "@orbit-build/model-providers";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { WorktreeManager } from "@orbit-ai/sandbox";
+import { WorktreeManager } from "@orbit-build/sandbox";
 
 describe("Orchestrator Multi-Agent Flow", () => {
   let testCwd: string;

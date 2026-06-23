@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { AgentLoop } from "./AgentLoop.js";
-import { OrbitConfig } from "@orbit-ai/config";
-import { ModelProvider } from "@orbit-ai/model-providers";
-import { Prompt } from "@orbit-ai/tui";
+import { OrbitConfig } from "@orbit-build/config";
+import { ModelProvider } from "@orbit-build/model-providers";
+import { Prompt } from "@orbit-build/tui";
 import fs from "fs";
 import path from "path";
 

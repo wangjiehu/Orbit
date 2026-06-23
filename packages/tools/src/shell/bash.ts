@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { execa } from "execa";
 import { OrbitTool, ToolContext, ToolResult } from "../types.js";
-import { LogTruncator } from "@orbit-ai/shared";
+import { LogTruncator } from "@orbit-build/shared";
 
 export const BashInputSchema = z.object({
   command: z.string(),

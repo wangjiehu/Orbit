@@ -7,7 +7,7 @@ import {
   rmSync,
 } from "fs";
 import { join, dirname } from "path";
-import { generateId, resolveSafePath } from "@orbit-ai/shared";
+import { generateId, resolveSafePath } from "@orbit-build/shared";
 import { FileBackup, Checkpoint } from "./types.js";
 
 export class CheckpointManager {

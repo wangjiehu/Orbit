@@ -6,7 +6,7 @@ describe("ConfigLoader tests", () => {
     const config = ConfigLoader.loadSync(process.cwd());
     expect(config.name).toBe("orbit-project");
     expect(config.provider.default).toBe("deepseek-openai");
-    expect(config.models.default).toBe("deepseek-chat");
+    expect(config.models.default).toBe("deepseek-v4-flash");
   });
 
   it("should apply CLI overrides", () => {

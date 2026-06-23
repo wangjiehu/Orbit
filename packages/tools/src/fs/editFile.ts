@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { readFileSync, writeFileSync } from "fs";
-import { resolveSafePath } from "@orbit-ai/shared";
+import { resolveSafePath } from "@orbit-build/shared";
 import { OrbitTool, ToolContext, ToolResult } from "../types.js";
 import type ts from "typescript";
 

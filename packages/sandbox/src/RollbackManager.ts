@@ -1,5 +1,5 @@
 import { existsSync, writeFileSync, unlinkSync } from "fs";
-import { resolveSafePath } from "@orbit-ai/shared";
+import { resolveSafePath } from "@orbit-build/shared";
 import { Checkpoint } from "./types.js";
 
 export class RollbackManager {

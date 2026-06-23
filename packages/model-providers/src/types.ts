@@ -60,6 +60,7 @@ export interface ModelChatInput {
   };
   responseFormat?: "text" | "json";
   abortSignal?: AbortSignal;
+  userId?: string;
 }
 
 export interface TokenUsage {

@@ -1,5 +1,5 @@
 import { promises as fsPromises } from "fs";
-import { resolveSafePath } from "@orbit-ai/shared";
+import { resolveSafePath } from "@orbit-build/shared";
 
 export class FileSummarizer {
   constructor(private cwd: string) {}

@@ -4,8 +4,8 @@ import { join, dirname, resolve } from "path";
 import { createHash } from "crypto";
 import glob from "fast-glob";
 import { z } from "zod";
-import { ConfigLoader } from "@orbit-ai/config";
-import { resolveSafePath, getGitBranch } from "@orbit-ai/shared";
+import { ConfigLoader } from "@orbit-build/config";
+import { resolveSafePath, getGitBranch } from "@orbit-build/shared";
 import ts from "typescript";
 import { ASTChunker } from "./ASTChunker.js";
 import { HybridSearch } from "./HybridSearch.js";
@@ -13,7 +13,7 @@ import {
   OpenAIProvider,
   DeepSeekOpenAIProvider,
   OllamaProvider,
-} from "@orbit-ai/model-providers";
+} from "@orbit-build/model-providers";
 
 export const SymbolEntrySchema = z.object({
   name: z.string(),

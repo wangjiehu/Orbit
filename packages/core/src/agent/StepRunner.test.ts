@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { StepRunner } from "./StepRunner.js";
-import { toolRegistry } from "@orbit-ai/tools";
+import { toolRegistry } from "@orbit-build/tools";
 
 describe("StepRunner Subprocess Timestamps & Limits", () => {
   beforeEach(() => {

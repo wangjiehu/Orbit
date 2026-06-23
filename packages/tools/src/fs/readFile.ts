@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { readFileSync } from "fs";
-import { resolveSafePath } from "@orbit-ai/shared";
+import { resolveSafePath } from "@orbit-build/shared";
 import { OrbitTool, ToolContext, ToolResult } from "../types.js";
 
 export const ReadFileInputSchema = z.object({

@@ -1,4 +1,4 @@
-import { OrbitMessage } from "@orbit-ai/model-providers";
+import { OrbitMessage } from "@orbit-build/model-providers";
 
 export interface AgentState {
   sessionId: string;

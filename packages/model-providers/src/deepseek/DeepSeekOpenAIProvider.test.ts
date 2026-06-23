@@ -25,7 +25,7 @@ describe("DeepSeekOpenAIProvider messages mapping", () => {
     const provider = new DeepSeekOpenAIProvider("test-key");
 
     const input = {
-      model: "deepseek-chat",
+      model: "deepseek-v4-flash",
       messages: [
         {
           role: "user" as const,
@@ -122,7 +122,7 @@ describe("DeepSeekOpenAIProvider messages mapping", () => {
 
     const result = await provider.complete("prefix_code", {
       suffix: "suffix_code",
-      model: "deepseek-chat"
+      model: "deepseek-v4-flash"
     });
 
     expect(result).toBe("completed_code");
@@ -138,6 +138,6 @@ describe("DeepSeekOpenAIProvider messages mapping", () => {
     const body = JSON.parse(completionsCall[1].body);
     expect(body.prompt).toBe("prefix_code");
     expect(body.suffix).toBe("suffix_code");
-    expect(body.model).toBe("deepseek-chat");
+    expect(body.model).toBe("deepseek-v4-flash");
   });
 });

@@ -1,4 +1,4 @@
-import { ToolRisk } from "@orbit-ai/shared";
+import { ToolRisk } from "@orbit-build/shared";
 
 export type PermissionAction = "allow" | "ask" | "deny";
 

@@ -10,6 +10,7 @@ export interface Session {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCostEstimate: number;
+  totalCacheReadTokens?: number;
 }
 
 export interface SessionEvent {

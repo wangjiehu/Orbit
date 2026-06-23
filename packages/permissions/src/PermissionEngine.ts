@@ -1,5 +1,5 @@
-import { ToolRisk } from "@orbit-ai/shared";
-import { OrbitConfig } from "@orbit-ai/config";
+import { ToolRisk } from "@orbit-build/shared";
+import { OrbitConfig } from "@orbit-build/config";
 import { PermissionDecision } from "./types.js";
 import { RiskClassifier } from "./RiskClassifier.js";
 

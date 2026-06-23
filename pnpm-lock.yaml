@@ -35,25 +35,25 @@ importers:
 
   packages/cli:
     dependencies:
-      '@orbit-ai/config':
+      '@orbit-build/config':
         specifier: workspace:*
         version: link:../config
-      '@orbit-ai/context-engine':
+      '@orbit-build/context-engine':
         specifier: workspace:*
         version: link:../context-engine
-      '@orbit-ai/core':
+      '@orbit-build/core':
         specifier: workspace:*
         version: link:../core
-      '@orbit-ai/model-providers':
+      '@orbit-build/model-providers':
         specifier: workspace:*
         version: link:../model-providers
-      '@orbit-ai/permissions':
+      '@orbit-build/permissions':
         specifier: workspace:*
         version: link:../permissions
-      '@orbit-ai/shared':
+      '@orbit-build/shared':
         specifier: workspace:*
         version: link:../shared
-      '@orbit-ai/tui':
+      '@orbit-build/tui':
         specifier: workspace:*
         version: link:../tui
       commander:
@@ -74,7 +74,7 @@ importers:
 
   packages/config:
     dependencies:
-      '@orbit-ai/shared':
+      '@orbit-build/shared':
         specifier: workspace:*
         version: link:../shared
       yaml:
@@ -86,16 +86,16 @@ importers:
 
   packages/context-engine:
     dependencies:
-      '@orbit-ai/config':
+      '@orbit-build/config':
         specifier: workspace:*
         version: link:../config
-      '@orbit-ai/model-providers':
+      '@orbit-build/model-providers':
         specifier: workspace:*
         version: link:../model-providers
-      '@orbit-ai/shared':
+      '@orbit-build/shared':
         specifier: workspace:*
         version: link:../shared
-      '@orbit-ai/tools':
+      '@orbit-build/tools':
         specifier: workspace:*
         version: link:../tools
       fast-glob:
@@ -110,34 +110,34 @@ importers:
 
   packages/core:
     dependencies:
-      '@orbit-ai/config':
+      '@orbit-build/config':
         specifier: workspace:*
         version: link:../config
-      '@orbit-ai/context-engine':
+      '@orbit-build/context-engine':
         specifier: workspace:*
         version: link:../context-engine
-      '@orbit-ai/mcp':
+      '@orbit-build/mcp':
         specifier: workspace:*
         version: link:../mcp
-      '@orbit-ai/model-providers':
+      '@orbit-build/model-providers':
         specifier: workspace:*
         version: link:../model-providers
-      '@orbit-ai/permissions':
+      '@orbit-build/permissions':
         specifier: workspace:*
         version: link:../permissions
-      '@orbit-ai/sandbox':
+      '@orbit-build/sandbox':
         specifier: workspace:*
         version: link:../sandbox
-      '@orbit-ai/session':
+      '@orbit-build/session':
         specifier: workspace:*
         version: link:../session
-      '@orbit-ai/shared':
+      '@orbit-build/shared':
         specifier: workspace:*
         version: link:../shared
-      '@orbit-ai/tools':
+      '@orbit-build/tools':
         specifier: workspace:*
         version: link:../tools
-      '@orbit-ai/tui':
+      '@orbit-build/tui':
         specifier: workspace:*
         version: link:../tui
       picocolors:
@@ -149,13 +149,13 @@ importers:
 
   packages/mcp:
     dependencies:
-      '@orbit-ai/config':
+      '@orbit-build/config':
         specifier: workspace:*
         version: link:../config
-      '@orbit-ai/shared':
+      '@orbit-build/shared':
         specifier: workspace:*
         version: link:../shared
-      '@orbit-ai/tools':
+      '@orbit-build/tools':
         specifier: workspace:*
         version: link:../tools
       zod:
@@ -164,10 +164,10 @@ importers:
 
   packages/model-providers:
     dependencies:
-      '@orbit-ai/config':
+      '@orbit-build/config':
         specifier: workspace:*
         version: link:../config
-      '@orbit-ai/shared':
+      '@orbit-build/shared':
         specifier: workspace:*
         version: link:../shared
       zod:
@@ -176,10 +176,10 @@ importers:
 
   packages/permissions:
     dependencies:
-      '@orbit-ai/config':
+      '@orbit-build/config':
         specifier: workspace:*
         version: link:../config
-      '@orbit-ai/shared':
+      '@orbit-build/shared':
         specifier: workspace:*
         version: link:../shared
       zod:
@@ -188,22 +188,22 @@ importers:
 
   packages/sandbox:
     dependencies:
-      '@orbit-ai/config':
+      '@orbit-build/config':
         specifier: workspace:*
         version: link:../config
-      '@orbit-ai/shared':
+      '@orbit-build/shared':
         specifier: workspace:*
         version: link:../shared
-      '@orbit-ai/tools':
+      '@orbit-build/tools':
         specifier: workspace:*
         version: link:../tools
 
   packages/session:
     dependencies:
-      '@orbit-ai/config':
+      '@orbit-build/config':
         specifier: workspace:*
         version: link:../config
-      '@orbit-ai/shared':
+      '@orbit-build/shared':
         specifier: workspace:*
         version: link:../shared
 
@@ -211,13 +211,13 @@ importers:
 
   packages/tools:
     dependencies:
-      '@orbit-ai/config':
+      '@orbit-build/config':
         specifier: workspace:*
         version: link:../config
-      '@orbit-ai/permissions':
+      '@orbit-build/permissions':
         specifier: workspace:*
         version: link:../permissions
-      '@orbit-ai/shared':
+      '@orbit-build/shared':
         specifier: workspace:*
         version: link:../shared
       execa:
@@ -235,10 +235,10 @@ importers:
       '@clack/prompts':
         specifier: ^0.7.0
         version: 0.7.0
-      '@orbit-ai/config':
+      '@orbit-build/config':
         specifier: workspace:*
         version: link:../config
-      '@orbit-ai/shared':
+      '@orbit-build/shared':
         specifier: workspace:*
         version: link:../shared
       picocolors:

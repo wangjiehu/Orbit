@@ -1,6 +1,6 @@
 import { execSync } from "child_process";
 import picocolors from "picocolors";
-import { ConfigLoader } from "@orbit-ai/config";
+import { ConfigLoader } from "@orbit-build/config";
 
 export function runDoctor(cwd: string): void {
   console.log(picocolors.bold("\nOrbit Environment Diagnostics:\n"));

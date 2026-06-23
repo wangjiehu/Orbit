@@ -151,7 +151,7 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
     const isReasoner =
       lowercase.includes("reasoner") ||
       lowercase.includes("r1") ||
-      lowercase.includes("v4");
+      lowercase.includes("v4-pro");
 
     const isOpenAIReasoner =
       this.id === "openai" &&
@@ -287,6 +287,10 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
       stream: input.stream !== false,
     };
 
+    if (input.userId) {
+      body.user_id = input.userId;
+    }
+
     if (isOpenAIReasoner) {
       body.max_completion_tokens = input.maxTokens;
       if (input.thinking?.enabled) {
@@ -392,7 +396,9 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
           inputTokens: data.usage?.prompt_tokens || 0,
           outputTokens: data.usage?.completion_tokens || 0,
           cacheReadTokens:
-            data.usage?.prompt_tokens_details?.cached_tokens || 0,
+            data.usage?.prompt_cache_hit_tokens ||
+            data.usage?.prompt_tokens_details?.cached_tokens ||
+            0,
           totalTokens: data.usage?.total_tokens || 0,
         },
       };
@@ -497,7 +503,9 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
                 promptTokens = parsed.usage.prompt_tokens || promptTokens;
                 completionTokens =
                   parsed.usage.completion_tokens || completionTokens;
-                if (parsed.usage.prompt_tokens_details?.cached_tokens) {
+                if (parsed.usage.prompt_cache_hit_tokens) {
+                  cacheReadTokens = parsed.usage.prompt_cache_hit_tokens;
+                } else if (parsed.usage.prompt_tokens_details?.cached_tokens) {
                   cacheReadTokens =
                     parsed.usage.prompt_tokens_details.cached_tokens;
                 }
@@ -642,8 +650,8 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
         bodyData.prompt = prompt;
         bodyData.suffix = options.suffix;
       }
-      if (!options?.model || options.model.includes("qwen")) {
-        bodyData.model = "deepseek-chat";
+      if (!options?.model || options.model.includes("qwen") || options.model === "deepseek-chat") {
+        bodyData.model = "deepseek-v4-flash";
       }
     }
 

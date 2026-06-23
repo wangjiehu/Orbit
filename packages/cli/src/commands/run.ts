@@ -1,20 +1,20 @@
 import {
   ConfigLoader,
-} from "@orbit-ai/config";
+} from "@orbit-build/config";
 import {
   AgentLoop,
   UserInteraction,
   Orchestrator,
   eventBus,
-} from "@orbit-ai/core";
+} from "@orbit-build/core";
 import {
   DeepSeekAnthropicProvider,
   DeepSeekOpenAIProvider,
   OpenAIProvider,
   AnthropicProvider,
   OllamaProvider,
-} from "@orbit-ai/model-providers";
-import { Prompt, DiffView } from "@orbit-ai/tui";
+} from "@orbit-build/model-providers";
+import { Prompt, DiffView } from "@orbit-build/tui";
 import picocolors from "picocolors";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
@@ -75,10 +75,10 @@ export async function runAgent(
 
   if (config.models) {
     if (config.models.default) {
-      config.models.default = config.models.default.replace(/\[1m\]/g, "");
+      config.models.default = config.models.default.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
     }
     if (config.models.fast) {
-      config.models.fast = config.models.fast.replace(/\[1m\]/g, "");
+      config.models.fast = config.models.fast.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
     }
   }
 

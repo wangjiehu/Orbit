@@ -1,7 +1,7 @@
 import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
-import { generateId } from "@orbit-ai/shared";
+import { generateId } from "@orbit-build/shared";
 
 export interface WorktreeSession {
   path: string;

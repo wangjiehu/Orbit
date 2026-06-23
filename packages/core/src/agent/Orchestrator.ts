@@ -1,12 +1,12 @@
-import { OrbitConfig } from "@orbit-ai/config";
-import { ModelProvider } from "@orbit-ai/model-providers";
+import { OrbitConfig } from "@orbit-build/config";
+import { ModelProvider } from "@orbit-build/model-providers";
 import { AgentLoop, UserInteraction } from "./AgentLoop.js";
 import { eventBus } from "../events/EventBus.js";
 import fs from "fs";
 import path from "path";
-import { WorktreeManager } from "@orbit-ai/sandbox";
+import { WorktreeManager } from "@orbit-build/sandbox";
 import { execSync } from "child_process";
-import { generateId } from "@orbit-ai/shared";
+import { generateId } from "@orbit-build/shared";
 
 export class Orchestrator {
   private currentLoop: AgentLoop | null = null;

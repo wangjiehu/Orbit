@@ -4,7 +4,7 @@ import path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { eventBus } from "../events/EventBus.js";
-import { CheckpointManager } from "@orbit-ai/sandbox";
+import { CheckpointManager } from "@orbit-build/sandbox";
 
 const execPromise = promisify(exec);
 

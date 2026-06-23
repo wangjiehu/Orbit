@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { MessageBuilder } from "./MessageBuilder.js";
 import { AgentState, createInitialState } from "./AgentState.js";
-import { ContextPack } from "@orbit-ai/context-engine";
+import { ContextPack } from "@orbit-build/context-engine";
 
 describe("MessageBuilder prompt caching", () => {
-  it("should decorate user message once and leave it unchanged on subsequent builds", () => {
+  it("should include codebase context and files excerpts in the system prompt", () => {
     const state = createInitialState("session-123", "fix the bug");
     state.history = [
       {
@@ -15,7 +15,7 @@ describe("MessageBuilder prompt caching", () => {
       },
     ];
 
-    const context1: ContextPack = {
+    const context: ContextPack = {
       projectIndex: {
         detectedLanguages: ["typescript"],
         frameworks: ["vitest"],
@@ -39,32 +39,69 @@ describe("MessageBuilder prompt caching", () => {
       tokenBudget: { max: 128000, usedEstimate: 100 },
     };
 
-    // First call: should decorate message
-    const build1 = MessageBuilder.build("System Prompt", state, context1);
-    const text1 = build1.messages[0].content[0].text;
-    expect(text1).toContain("RAG context A");
-    expect(text1).toContain("console.log('hello');");
-    expect(build1.messages[0].metadata?.rawText).toBe("fix the bug");
+    const build = MessageBuilder.build("System Prompt Base", state, context);
 
-    // Modify context pack for subsequent step
-    const context2: ContextPack = {
-      ...context1,
+    // Verify system prompt contains stable base AND dynamic context
+    expect(build.system).toContain("System Prompt Base");
+    expect(build.system).toContain("RAG context A");
+    expect(build.system).toContain("console.log('hello');");
+    expect(build.system).toContain("Use spaces.");
+
+    // Verify user message (last message) is clean and undecorated
+    const lastMsgText = build.messages[0].content[0].text;
+    expect(lastMsgText).toBe("fix the bug");
+  });
+
+  it("should keep messages stable across multiple turns and steps", () => {
+    const state = createInitialState("session-123", "run tests");
+    state.history = [
+      {
+        id: "msg-1",
+        role: "user",
+        createdAt: new Date().toISOString(),
+        content: [{ type: "text", text: "decorated user message from Turn 1" }],
+      },
+      {
+        id: "msg-2",
+        role: "assistant",
+        createdAt: new Date().toISOString(),
+        content: [{ type: "text", text: "done" }],
+      },
+      {
+        id: "msg-3",
+        role: "user",
+        createdAt: new Date().toISOString(),
+        content: [{ type: "text", text: "run tests" }],
+      },
+    ];
+
+    const context: ContextPack = {
+      projectIndex: {
+        detectedLanguages: ["typescript"],
+        frameworks: ["vitest"],
+        entrypoints: [],
+        packageManager: "pnpm",
+        files: {},
+      },
+      projectInstructions: "",
+      relevantFiles: [],
+      recentChanges: "",
+      currentDiff: "",
+      previousErrors: "",
       codebaseContext: "RAG context B",
-      relevantFiles: [
-        {
-          path: "src/index.ts",
-          reason: "entrypoint",
-          summary: "entry point file",
-          excerpt: "console.log('hello modified');",
-        },
-      ],
+      tokenBudget: { max: 128000, usedEstimate: 100 },
     };
 
-    // Second call: should NOT re-decorate because rawText metadata is set
-    const build2 = MessageBuilder.build("System Prompt", state, context2);
-    const text2 = build2.messages[0].content[0].text;
-    expect(text2).toBe(text1); // Should remain completely identical to the first build output
-    expect(text2).not.toContain("RAG context B");
-    expect(text2).not.toContain("hello modified");
+    const build = MessageBuilder.build("System Prompt Base", state, context);
+
+    // Verify the system prompt contains stable base AND dynamic context
+    expect(build.system).toContain("System Prompt Base");
+    expect(build.system).toContain("RAG context B");
+
+    // Verify only messages are stable and undecorated
+    expect(build.messages.length).toBe(3);
+    expect(build.messages[0].content[0].text).toBe("decorated user message from Turn 1");
+    expect(build.messages[1].content[0].text).toBe("done");
+    expect(build.messages[2].content[0].text).toBe("run tests");
   });
 });

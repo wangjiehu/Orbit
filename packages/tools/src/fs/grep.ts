@@ -2,7 +2,7 @@ import { z } from "zod";
 import { readFileSync } from "fs";
 import { execa } from "execa";
 import glob from "fast-glob";
-import { resolveSafePath } from "@orbit-ai/shared";
+import { resolveSafePath } from "@orbit-build/shared";
 import { OrbitTool, ToolContext, ToolResult } from "../types.js";
 
 export const GrepInputSchema = z.object({

@@ -2,7 +2,7 @@ import {
   ToolRisk,
   checkWorkspaceBoundary,
   normalizePath,
-} from "@orbit-ai/shared";
+} from "@orbit-build/shared";
 
 const DANGEROUS_COMMAND_REGEXES = [
   /\brm\s+-rf\b/i,

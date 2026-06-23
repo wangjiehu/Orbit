@@ -8,7 +8,7 @@ import {
   readdirSync,
   rmSync,
 } from "fs";
-import { generateId } from "@orbit-ai/shared";
+import { generateId } from "@orbit-build/shared";
 import {
   Session,
   SessionEvent,

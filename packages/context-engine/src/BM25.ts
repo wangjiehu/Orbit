@@ -1,7 +1,7 @@
 import { existsSync, promises as fsPromises } from "fs";
 import { join, dirname } from "path";
 import { Document } from "./VectorStore.js";
-import { getGitBranch } from "@orbit-ai/shared";
+import { getGitBranch } from "@orbit-build/shared";
 
 export function tokenize(text: string): string[] {
   const rawWords = text

@@ -1,20 +1,13 @@
-import { AgentLoop, UserInteraction, Orchestrator } from "@orbit-ai/core";
+import { AgentLoop, UserInteraction } from "@orbit-build/core";
 import { FullscreenTui } from "../tui/FullscreenTui.js";
-import { resolveSafePath, generateId } from "@orbit-ai/shared";
-import { ConfigSchema } from "@orbit-ai/config";
-import {
-  DeepSeekAnthropicProvider,
-  DeepSeekOpenAIProvider,
-  OpenAIProvider,
-  AnthropicProvider,
-} from "@orbit-ai/model-providers";
-import { Prompt } from "@orbit-ai/tui";
+import { ConfigSchema } from "@orbit-build/config";
+import { Prompt } from "@orbit-build/tui";
 import picocolors from "picocolors";
 import glob from "fast-glob";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, readdirSync } from "fs";
+import { existsSync, readFileSync, readdirSync, unlinkSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { homedir } from "os";
-import { PermissionEngine } from "@orbit-ai/permissions";
+import { PermissionEngine } from "@orbit-build/permissions";
 import { expandCustomCommand, loadCustomCommands } from "../commands/customCommands.js";
 import { createRequire } from "module";
 
@@ -30,40 +23,12 @@ export const BUILTIN_SLASH_COMMANDS = [
   "/exit",
   "/quit",
   "/rollback",
-  "/timeline",
-  "/rewind",
   "/clear",
-  "/compact",
-  "/history",
-  "/edit",
-  "/inspect",
-  "/doc",
-  "/diagnose",
-  "/resolve",
-  "/references",
-  "/run",
-  "/grep",
-  "/api",
-  "/register",
-  "/language",
-  "/fork",
+  "/add",
+  "/drop",
   "/mode",
-  "/ask",
-  "/code",
   "/copy",
-  "/copy-context",
-  "/git",
-  "/tokens",
-  "/read-only",
-  "/readonly",
-  "/new",
-  "/reset",
-  "/delete",
-  "/rm",
-  "/del",
-  "/btw",
-  "/memory",
-  "/commands",
+  "/update",
 ] as const;
 
 export class CommandRouter {
@@ -100,8 +65,6 @@ export class CommandRouter {
     const config = this.config;
     const loop = this.loop;
     const cwd = this.cwd;
-    const multi = this.multi;
-    const tuiInteraction = this.tuiInteraction;
 
     if (trimmed.startsWith("/")) {
       const commandName = trimmed.slice(1).split(/\s+/, 1)[0].toLowerCase();
@@ -184,6 +147,8 @@ export class CommandRouter {
 
       try {
         const { spawnSync } = await import("child_process");
+        // NOTE: shell:true is intentional here — the user explicitly typed a shell command.
+        // The PermissionEngine above already evaluated and optionally prompted approval.
         const result = spawnSync(shellCmd, {
           cwd,
           stdio: "inherit",
@@ -236,377 +201,81 @@ export class CommandRouter {
       }
 
       if (command === "/help") {
-        const helpText = [
-          "",
-          "Available Slash Commands:",
-          "  /help           - Show this help message",
-          "  /status         - Display session provider, active model, cost, and budget",
-          "  /config [k=v]   - View or modify configurations interactively or via key=value",
-          "  /model [name]   - Get or set the active model dynamically",
-          "  /chat [sub]     - Manage/switch sessions (subcommands: list/ls, new, delete/rm, switch <id/index>)",
-          "  /api            - Configure API keys and Base URLs interactively",
-          "  /commit [msg]   - Stage changes and commit them (LLM message generation if empty)",
-          "  /exit, /quit    - Terminate the REPL session",
-          "  /rollback       - Revert the last file edits checkpoint",
-          "  /timeline       - List persistent file checkpoints for this session",
-          "  /rewind [id|n]  - Rewind this session to a selected checkpoint",
-          "  /clear          - Clear terminal screen",
-          "  /compact        - Compact older agent chat history",
-          "  /history        - Display command history of this session",
-          "  /edit           - Open external editor for long/multiline prompts",
-          "  /inspect        - (CodeWhale) Visualize codebase outline and stats",
-          "  /doc [file]     - (Codex) Generate TSDoc/JSDoc documentation for a file",
-          "  /diagnose       - (AtomCode) Run tests and auto-repair failures",
-          "  /resolve [file] - Resolve merge conflicts in a file semantically using LLM",
-          "  /references [s] - Find all call sites and usages of symbol s in workspace",
-          "  /run <cmd>      - Execute a shell command directly (shortcut: !<cmd>)",
-          "  /grep <query>   - Search for string patterns across workspace files and add them",
-          "  /fork [name]    - Fork current session with history into a new session",
-          "  /fork tree      - Display lineage hierarchy tree of session forks",
-          "  /fork switch <id/idx> - Switch focus to specified branch session",
-          "  /mode [mode]    - Switch security confirmation mode (strict, normal, auto, plan)",
-          "  /ask            - Shortcut for /mode strict (read-only / high security)",
-          "  /code           - Shortcut for /mode normal (default editing mode)",
-          "  /copy           - Copy the last assistant response to system clipboard",
-          "  /copy-context   - Copy active context files list to system clipboard",
-          "  /git <args>     - Execute a git command directly in the sandbox",
-          "  /tokens         - Report detailed token usage & cost for the session",
-          "  /read-only <f>  - Add files to context as read-only references",
-          "  /btw <q>        - Ask a quick side-question without polluting history",
-          "  /memory         - View workspace memory / AGENTS.md guidelines",
-          "  /commands       - List project and user custom prompt commands",
-          "",
-        ].join("\n");
+        const isZh = config.language === "zh";
+        let helpText = "";
+
+        if (isZh) {
+          helpText = [
+            "",
+            picocolors.bold(picocolors.cyan("● Orbit 交互式终端指令指南")),
+            "",
+            picocolors.bold(picocolors.yellow("  [ 上下文管理 (Context) ]")),
+            `    ${picocolors.green("/add")}   ${picocolors.cyan("<file>")}     - 添加文件/目录至当前上下文 (使用 -r 设为只读)`,
+            `    ${picocolors.green("/drop")}  ${picocolors.cyan("<file>")}     - 从活动上下文中移除指定文件或通配符模式`,
+            `    ${picocolors.green("/clear")}            - 清空终端屏幕和滚动缓冲`,
+            "",
+            picocolors.bold(picocolors.yellow("  [ 会话与历史 (Session) ]")),
+            `    ${picocolors.green("/chat")}   ${picocolors.cyan("[action]")}   - 管理对话会话 (子命令: list/ls, new, delete/rm, switch)`,
+            `    ${picocolors.green("/rollback")}         - 回滚最近的文件修改检查点`,
+            `    ${picocolors.green("/copy")}             - 拷贝 AI 的最新回复至系统剪贴板`,
+            "",
+            picocolors.bold(picocolors.yellow("  [ 配置与状态 (Settings) ]")),
+            `    ${picocolors.green("/status")}           - 诊断并展示当前会话、模型、Token 消耗和限额`,
+            `    ${picocolors.green("/config")}   ${picocolors.cyan("[k=v]")}    - 查看或交互式/直接修改配置参数`,
+            `    ${picocolors.green("/model")}    ${picocolors.cyan("[name]")}   - 动态查询或切换正在使用的 AI 语言大模型`,
+            `    ${picocolors.green("/mode")}     ${picocolors.cyan("[mode]")}   - 切换安全确认模式 (strict, normal, auto, plan)`,
+            `    ${picocolors.green("/update")}           - 检测并更新项目依赖包 (如 npm install)`,
+            "",
+            picocolors.bold(picocolors.yellow("  [ Git 提交 (Git) ]")),
+            `    ${picocolors.green("/commit")}   ${picocolors.cyan("[msg]")}    - 暂存工作区修改并生成提交 (空消息时使用 LLM 自动生成)`,
+            "",
+            picocolors.bold(picocolors.yellow("  [ 系统控制 (System) ]")),
+            `    ${picocolors.green("/help")}             - 显示此帮助信息`,
+            `    ${picocolors.green("/exit")} / ${picocolors.green("/quit")}     - 安全退出交互式终端`,
+            "",
+            picocolors.bold(picocolors.cyan("  [ 系统控制 (System) ]")),
+            `    ${picocolors.green("!<cmd>")}            - 直接执行系统原生 Shell 命令 (例如: !git diff)`,
+            "",
+          ].join("\n");
+        } else {
+          helpText = [
+            "",
+            picocolors.bold(picocolors.cyan("● Orbit Interactive Shell Commands Guide")),
+            "",
+            picocolors.bold(picocolors.yellow("  [ Context Management ]")),
+            `    ${picocolors.green("/add")}   ${picocolors.cyan("<file>")}     - Add files/dirs to prompt context (use -r for read-only)`,
+            `    ${picocolors.green("/drop")}  ${picocolors.cyan("<file>")}     - Remove files/patterns from active prompt context`,
+            `    ${picocolors.green("/clear")}            - Clear the terminal screen and scrollback buffer`,
+            "",
+            picocolors.bold(picocolors.yellow("  [ Session & History ]")),
+            `    ${picocolors.green("/chat")}   ${picocolors.cyan("[action]")}   - Manage sessions (subcommands: list/ls, new, delete/rm, switch)`,
+            `    ${picocolors.green("/rollback")}         - Revert the last file edits checkpoint`,
+            `    ${picocolors.green("/copy")}             - Copy last assistant response to system clipboard`,
+            "",
+            picocolors.bold(picocolors.yellow("  [ Configuration & Status ]")),
+            `    ${picocolors.green("/status")}           - Display active session info, token usage, and budget limits`,
+            `    ${picocolors.green("/config")}   ${picocolors.cyan("[k=v]")}    - View or modify configurations interactively or via key=value`,
+            `    ${picocolors.green("/model")}    ${picocolors.cyan("[name]")}   - Query or dynamically swap the active AI model`,
+            `    ${picocolors.green("/mode")}     ${picocolors.cyan("[mode]")}   - Switch permission safety mode (strict, normal, auto, plan)`,
+            `    ${picocolors.green("/update")}           - Detect and update project dependencies (npm/pnpm/yarn install)`,
+            "",
+            picocolors.bold(picocolors.yellow("  [ Git Operations ]")),
+            `    ${picocolors.green("/commit")}   ${picocolors.cyan("[msg]")}    - Stage all changes and commit (generates message via LLM if empty)`,
+            "",
+            picocolors.bold(picocolors.yellow("  [ System Commands ]")),
+            `    ${picocolors.green("/help")}             - Show this commands guide`,
+            `    ${picocolors.green("/exit")} / ${picocolors.green("/quit")}     - Terminate the interactive session`,
+            "",
+            picocolors.bold(picocolors.cyan("  [ Direct Shell Execution ]")),
+            `    ${picocolors.green("!<cmd>")}            - Run a raw shell command directly on the host machine (e.g. !git status)`,
+            "",
+          ].join("\n");
+        }
         this.printOutput(helpText);
         return { shouldExit: false, processed: true };
       }
 
-      if (command === "/commands") {
-        const isZh = config.language === "zh";
-        const customCommands = loadCustomCommands(
-          cwd,
-          BUILTIN_SLASH_COMMANDS,
-        );
-        if (customCommands.length === 0) {
-          this.printOutput(
-            picocolors.yellow(
-              isZh
-                ? "未发现自定义命令。可在 .orbit/commands/*.md 或 ~/.orbit/commands/*.md 中创建。"
-                : "No custom commands found. Create them in .orbit/commands/*.md or ~/.orbit/commands/*.md.",
-            ),
-          );
-          return { shouldExit: false, processed: true };
-        }
-        this.printOutput(
-          [
-            picocolors.bold(
-              picocolors.cyan(
-                isZh
-                  ? "\n=== Orbit 自定义命令 ==="
-                  : "\n=== Orbit Custom Commands ===",
-              ),
-            ),
-            ...customCommands.map(
-              (customCommand) =>
-                `  /${picocolors.green(customCommand.name)}${customCommand.argumentHint ? ` ${picocolors.dim(customCommand.argumentHint)}` : ""}\n    ${customCommand.description} ${picocolors.dim(`[${customCommand.source}]`)}`,
-            ),
-            picocolors.cyan("============================\n"),
-          ].join("\n"),
-        );
-        return { shouldExit: false, processed: true };
-      }
 
-      if (command === "/api" || command === "/register") {
-        const wasActive = useFullscreenTui && tui.isActive;
-        if (wasActive) tui.stop();
-        try {
-          const restoreTuiAndPrint = (msg: string) => {
-            if (wasActive && !tui.isActive) {
-              tui.start(config.budgetLimit);
-            }
-            this.printOutput(msg);
-          };
-
-          const providersList = [
-            {
-              value: "deepseek-openai",
-              label: "DeepSeek (OpenAI compatible)",
-            },
-            {
-              value: "deepseek-anthropic",
-              label: "DeepSeek (Anthropic compatible)",
-            },
-            { value: "openai", label: "OpenAI" },
-            { value: "anthropic", label: "Anthropic" },
-          ];
-          const providerKey = await Prompt.askSelect(
-            "Select API Provider to configure:",
-            providersList,
-          );
-          if (!providerKey) {
-            restoreTuiAndPrint(
-              picocolors.yellow("API configuration cancelled."),
-            );
-            return { shouldExit: false, processed: true };
-          }
-
-          const defaultBaseUrl =
-            config.providers[providerKey]?.baseUrl ||
-            (providerKey === "deepseek-openai"
-              ? "https://api.deepseek.com"
-              : providerKey === "deepseek-anthropic"
-                ? "https://api.deepseek.com/anthropic"
-                : providerKey === "openai"
-                  ? "https://api.openai.com/v1"
-                  : providerKey === "anthropic"
-                    ? "https://api.anthropic.com"
-                    : "");
-          const baseUrl = await Prompt.askText(
-            `Enter Base URL for ${providerKey}:`,
-            defaultBaseUrl,
-          );
-          if (baseUrl === null) {
-            restoreTuiAndPrint(
-              picocolors.yellow("API configuration cancelled."),
-            );
-            return { shouldExit: false, processed: true };
-          }
-
-          const apiKey = await Prompt.askPassword(
-            `Enter API Key for ${providerKey}:`,
-          );
-          if (apiKey === null) {
-            restoreTuiAndPrint(
-              picocolors.yellow("API configuration cancelled."),
-            );
-            return { shouldExit: false, processed: true };
-          }
-
-          const apiKeyEnv =
-            providerKey === "deepseek-openai"
-              ? "DEEPSEEK_API_KEY"
-              : providerKey === "deepseek-anthropic"
-                ? "ANTHROPIC_AUTH_TOKEN"
-                : providerKey === "openai"
-                  ? "OPENAI_API_KEY"
-                  : providerKey === "anthropic"
-                    ? "ANTHROPIC_API_KEY"
-                    : `${providerKey.toUpperCase().replace(/-/g, "_")}_API_KEY`;
-
-          // 1. Save API Key securely
-          const credsManager = new CredentialsManager();
-          credsManager.storeSecret(apiKeyEnv, apiKey);
-
-          // 2. Save Base URL and apiKeyEnv to global config.yaml
-          const { parse: yamlParse, stringify: yamlStringify } = await import("yaml");
-
-          const globalConfigPath = join(
-            homedir(),
-            ".orbit",
-            "config.yaml",
-          );
-          let globalConfig: any = {};
-          if (existsSync(globalConfigPath)) {
-            try {
-              const raw = readFileSync(globalConfigPath, "utf8");
-              globalConfig = yamlParse(raw) || {};
-            } catch {
-              globalConfig = {};
-            }
-          }
-          if (!globalConfig.providers) {
-            globalConfig.providers = {};
-          }
-          globalConfig.providers[providerKey] = {
-            ...globalConfig.providers[providerKey],
-            baseUrl,
-            apiKeyEnv,
-          };
-          try {
-            const dir = dirname(globalConfigPath);
-            if (!existsSync(dir)) {
-              mkdirSync(dir, { recursive: true });
-            }
-            writeFileSync(globalConfigPath, yamlStringify(globalConfig), "utf8");
-            restoreTuiAndPrint(
-              picocolors.green(
-                `✔ Saved provider "${providerKey}" configuration to global config at ${globalConfigPath}`,
-              ),
-            );
-          } catch (err: any) {
-            restoreTuiAndPrint(
-              picocolors.red(`Failed to save global config: ${err.message}`),
-            );
-          }
-
-          // 3. Update active session configuration in memory
-          const activeConfig = loop.getConfig();
-          if (!activeConfig.providers[providerKey]) {
-            activeConfig.providers[providerKey] = {
-              type: providerKey.includes("anthropic")
-                ? "anthropic-compatible"
-                : "openai-compatible",
-            };
-          }
-          activeConfig.providers[providerKey].baseUrl = baseUrl;
-          activeConfig.providers[providerKey].apiKeyEnv = apiKeyEnv;
-          activeConfig.providers[providerKey].apiKey = apiKey;
-
-          // 4. Update the active providerInstance if configuring the current active provider
-          const currentProviderKey = activeConfig.provider.default;
-          if (providerKey === currentProviderKey && this.providerInstance) {
-            this.providerInstance.apiKey = apiKey;
-            this.providerInstance.baseUrl = baseUrl;
-            restoreTuiAndPrint(
-              picocolors.green(
-                `✔ Instantly updated current provider "${providerKey}" session credentials.`,
-              ),
-            );
-          }
-
-          // 5. Ask if the user wants to switch the active provider to this provider
-          if (providerKey !== currentProviderKey) {
-            const switchNow = await Prompt.askApproval(
-              `Would you like to switch the active provider to "${providerKey}" now?`,
-            );
-            if (switchNow) {
-              activeConfig.provider.default = providerKey;
-
-              // Re-create the providerInstance dynamically!
-              let newProviderInstance: any;
-              if (providerKey === "deepseek-anthropic") {
-                newProviderInstance = new DeepSeekAnthropicProvider(
-                  apiKey,
-                  baseUrl,
-                );
-              } else if (providerKey === "deepseek-openai") {
-                newProviderInstance = new DeepSeekOpenAIProvider(
-                  apiKey,
-                  baseUrl,
-                );
-              } else if (providerKey === "openai") {
-                newProviderInstance = new OpenAIProvider(apiKey, baseUrl);
-              } else if (providerKey === "anthropic") {
-                newProviderInstance = new AnthropicProvider(apiKey, baseUrl);
-              }
-
-              if (newProviderInstance) {
-                this.setProviderInstance(newProviderInstance);
-                (loop as any).provider = newProviderInstance;
-                restoreTuiAndPrint(
-                  picocolors.green(
-                    `✔ Switched session provider to "${providerKey}".`,
-                  ),
-                );
-              } else {
-                restoreTuiAndPrint(
-                  picocolors.red(
-                    `Failed to instantiate provider for "${providerKey}".`,
-                  ),
-                );
-              }
-            }
-          }
-        } finally {
-          if (wasActive && !tui.isActive) {
-            tui.start(config.budgetLimit);
-          }
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/edit") {
-        const wasActive = useFullscreenTui && tui.isActive;
-        if (wasActive) tui.stop();
-        try {
-          const restoreTuiAndPrint = (msg: string) => {
-            if (wasActive && !tui.isActive) {
-              tui.start(config.budgetLimit);
-            }
-            this.printOutput(msg);
-          };
-
-          const tempFile = join(cwd, ".orbit", "orbit_prompt.md");
-          try {
-            const orbitDir = join(cwd, ".orbit");
-            if (!existsSync(orbitDir)) {
-              mkdirSync(orbitDir, { recursive: true });
-            }
-            writeFileSync(
-              tempFile,
-              "# Describe your task or prompt here\n\n",
-              "utf8",
-            );
-            console.log(
-              picocolors.cyan(
-                `Opening editor... Please save and close the file when finished.`,
-              ),
-            );
-            const editor =
-              config.editor || process.env.EDITOR || "notepad.exe";
-            const { execSync } = await import("child_process");
-            execSync(`${editor} "${tempFile}"`);
-            const promptContent = readFileSync(tempFile, "utf8")
-              .replace(/#.*?\n/, "") // Strip header
-              .trim();
-            if (existsSync(tempFile)) {
-              import("fs").then(fs => fs.unlinkSync(tempFile));
-            }
-            if (!promptContent) {
-              restoreTuiAndPrint(
-                picocolors.yellow("Empty prompt. Aborting."),
-              );
-              return { shouldExit: false, processed: true };
-            }
-            restoreTuiAndPrint(
-              picocolors.green(
-                `Loaded prompt: "${promptContent.substring(0, 60)}..."`,
-              ),
-            );
-
-            // Restart TUI before running agent
-            if (wasActive && !tui.isActive) {
-              tui.start(config.budgetLimit);
-            }
-
-            const state = (loop as any).state;
-            state.task = promptContent;
-            state.done = false;
-            state.attemptCount = 0;
-
-            state.history.push({
-              id: `msg_user_${Date.now()}`,
-              role: "user",
-              createdAt: new Date().toISOString(),
-              content: [{ type: "text", text: promptContent }],
-            });
-
-            if (multi) {
-              const orchestrator = new Orchestrator(
-                cwd,
-                config,
-                this.providerInstance,
-                promptContent,
-                tuiInteraction,
-              );
-              await orchestrator.run();
-            } else {
-              await loop.run();
-            }
-            tui.syncFromLoop(loop);
-            tui.finishAttempt();
-          } catch (err: any) {
-            restoreTuiAndPrint(
-              picocolors.red(`Failed to open editor: ${err.message}`),
-            );
-          }
-        } finally {
-          if (wasActive && !tui.isActive) {
-            tui.start(config.budgetLimit);
-          }
-        }
-        return { shouldExit: false, processed: true };
-      }
 
       if (command === "/rollback") {
         const isZh = config.language === "zh";
@@ -696,8 +365,9 @@ export class CommandRouter {
                   } catch {
                     try {
                       const fullP = resolve(cwd, file);
+                      // Use the statically-imported unlinkSync (avoids fire-and-forget async import)
                       if (existsSync(fullP)) {
-                        import("fs").then(fs => fs.unlinkSync(fullP));
+                        unlinkSync(fullP);
                       }
                     } catch {}
                   }
@@ -733,79 +403,58 @@ export class CommandRouter {
         return { shouldExit: false, processed: true };
       }
 
-      if (command === "/timeline") {
-        const checkpoints = loop.getCheckpoints();
+      if (command === "/update") {
         const isZh = config.language === "zh";
-        if (checkpoints.length === 0) {
-          this.printOutput(
-            picocolors.yellow(
-              isZh
-                ? "当前会话没有可用检查点。"
-                : "No checkpoints are available for this session.",
-            ),
-          );
-          return { shouldExit: false, processed: true };
-        }
-        const lines = [
-          picocolors.bold(
-            picocolors.cyan(
-              isZh
-                ? "\n=== Orbit 检查点时间线 ==="
-                : "\n=== Orbit Checkpoint Timeline ===",
-            ),
-          ),
-          ...checkpoints.map((checkpoint, index) => {
-            const time = new Date(checkpoint.timestamp).toLocaleString();
-            return `${index + 1}. ${picocolors.green(checkpoint.id)}  ${picocolors.gray(time)}\n   ${checkpoint.files.join(", ")}  ${picocolors.dim(checkpoint.toolCallId)}`;
-          }),
-          picocolors.cyan("================================\n"),
-        ];
-        this.printOutput(lines.join("\n"));
-        return { shouldExit: false, processed: true };
-      }
+        const wasActive = useFullscreenTui && tui.isActive;
 
-      if (command === "/rewind") {
-        const checkpoints = loop.getCheckpoints();
-        const isZh = config.language === "zh";
-        if (checkpoints.length === 0) {
-          this.printOutput(
-            picocolors.yellow(
-              isZh
-                ? "当前会话没有可回退的检查点。"
-                : "No checkpoints are available to rewind.",
-            ),
+        // 1. Check if package.json exists
+        const packageJsonPath = join(cwd, "package.json");
+        if (!existsSync(packageJsonPath)) {
+          console.log(
+            isZh
+              ? picocolors.yellow("当前工作区没有检测到 package.json，不支持 npm 更新。")
+              : picocolors.yellow("No package.json found in the workspace. npm update not supported."),
           );
           return { shouldExit: false, processed: true };
         }
-        let target = parts.slice(1).join(" ").trim();
-        if (!target) {
-          const wasActive = useFullscreenTui && tui.isActive;
-          if (wasActive) tui.stop();
-          const options = [...checkpoints].reverse().map((checkpoint) => ({
-            value: checkpoint.id,
-            label: `${checkpoint.id} — ${checkpoint.files.join(", ")} — ${new Date(checkpoint.timestamp).toLocaleString()}`,
-          }));
-          options.push({ value: "cancel", label: isZh ? "取消" : "Cancel" });
-          target =
-            (await Prompt.askSelect(
-              isZh
-                ? "选择要回退到的检查点："
-                : "Select a checkpoint to rewind to:",
-              options,
-            )) || "cancel";
+
+        // 2. Determine command to use
+        let installCmd = "npm install";
+        if (existsSync(join(cwd, "pnpm-lock.yaml"))) {
+          installCmd = "pnpm install";
+        } else if (existsSync(join(cwd, "yarn.lock"))) {
+          installCmd = "yarn install";
+        } else if (existsSync(join(cwd, "bun.lockb"))) {
+          installCmd = "bun install";
+        }
+
+        if (wasActive) tui.stop();
+
+        try {
+          const approved = await Prompt.askApproval(
+            isZh
+              ? `检测到项目依赖需要更新，是否运行 "${installCmd}"？`
+              : `NPM dependencies need update. Run "${installCmd}"?`,
+          );
+
+          if (approved) {
+            console.log(picocolors.cyan(`\n● Running "${installCmd}"...`));
+            const { execSync } = await import("child_process");
+            execSync(installCmd, { cwd, stdio: "inherit" });
+            console.log(picocolors.green(`✔ Dependencies updated successfully.\n`));
+
+            // Force clear TUI's cached npm check status so the heart turns red immediately
+            (tui as any).npmNeedsUpdate = false;
+            (tui as any).lastNpmCheckTime = Date.now();
+          } else {
+            console.log(picocolors.yellow(`\n✖ Update cancelled by user.\n`));
+          }
+        } catch (err: any) {
+          console.log(picocolors.red(`\n✖ Update failed: ${err.message}\n`));
+        } finally {
+          tui.syncFromLoop(loop);
           if (wasActive) tui.start(config.budgetLimit);
         }
-        if (target === "cancel") return { shouldExit: false, processed: true };
-        const index = Number(target);
-        if (
-          Number.isInteger(index) &&
-          index >= 1 &&
-          index <= checkpoints.length
-        ) {
-          target = checkpoints[index - 1].id;
-        }
-        await loop.rewindToCheckpoint(target);
-        tui.syncFromLoop(loop);
         return { shouldExit: false, processed: true };
       }
 
@@ -1210,14 +859,6 @@ export class CommandRouter {
                   value: "deepseek-v4-pro",
                   label: "deepseek-v4-pro (DeepSeek-V4 / Advanced & Pro)",
                 },
-                {
-                  value: "deepseek-chat",
-                  label: "deepseek-chat (DeepSeek-V3 / Chat)",
-                },
-                {
-                  value: "deepseek-reasoner",
-                  label: "deepseek-reasoner (DeepSeek-R1 / Reasoner)",
-                },
               ];
             } else if (providerId === "ollama") {
               modelOptions = [
@@ -1405,134 +1046,30 @@ export class CommandRouter {
         return { shouldExit: false, processed: true };
       }
 
-      if (command === "/diff") {
-        try {
-          const { execSync } = await import("child_process");
-          const diffOutput = execSync("git diff --color", {
-            cwd,
-            stdio: ["ignore", "pipe", "ignore"],
-          }).toString();
-          if (!diffOutput.trim()) {
-            const isZh = config.language === "zh";
-            console.log(
-              isZh
-                ? picocolors.yellow("\n工作区未检测到任何代码变更。")
-                : picocolors.yellow("\nNo changes detected in workspace."),
-            );
-          } else {
-            const wasActive = useFullscreenTui && tui.isActive;
-            if (wasActive) tui.stop();
 
-            const { pageText } = await import("../tui/FullscreenTui.js");
-            await pageText(diffOutput);
-
-            if (wasActive) tui.start(config.budgetLimit);
-          }
-        } catch (err: any) {
-          const isZh = config.language === "zh";
-          console.log(
-            isZh
-              ? picocolors.red(`生成 Git 差异比对失败: ${err.message}`)
-              : picocolors.red(`Failed to generate git diff: ${err.message}`),
-          );
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/test") {
-        let testCmd = "";
-        const projectIndex = (loop as any).cachedContextPack?.projectIndex;
-        if (
-          projectIndex?.testCommands &&
-          projectIndex.testCommands.length > 0
-        ) {
-          testCmd = projectIndex.testCommands[0];
-        }
-
-        if (!testCmd) {
-          const pkgPath = join(cwd, "package.json");
-          if (existsSync(pkgPath)) {
-            try {
-              const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-              if (
-                pkg.scripts &&
-                pkg.scripts.test &&
-                pkg.scripts.test !==
-                  'echo "Error: no test specified" && exit 1'
-              ) {
-                testCmd = "npm test";
-              }
-            } catch {}
-          }
-        }
-
-        if (!testCmd) {
-          testCmd = "npm test";
-        }
-
-        const isZh = config.language === "zh";
-        console.log(
-          isZh
-            ? picocolors.cyan(`\n正在执行单元测试，指令: ${testCmd}...`)
-            : picocolors.cyan(`\nRunning tests via: ${testCmd}...`),
-        );
-        try {
-          const { spawn } = await import("child_process");
-          const wasActive = useFullscreenTui && tui.isActive;
-          if (wasActive) tui.stop();
-
-          await new Promise<void>((resolve) => {
-            const parts = testCmd.split(/\s+/);
-            const child = spawn(parts[0], parts.slice(1), {
-              cwd,
-              stdio: "inherit",
-              shell: true,
-            });
-            child.on("close", (code) => {
-              if (code === 0) {
-                console.log(
-                  isZh
-                    ? picocolors.green(`\n✔ 测试顺利通过。`)
-                    : picocolors.green(`\n✔ Tests completed successfully.`),
-                );
-              } else {
-                console.log(
-                  isZh
-                    ? picocolors.red(`\n✖ 测试执行失败，退出代码: ${code}`)
-                    : picocolors.red(
-                        `\n✖ Tests failed with exit code ${code}`,
-                      ),
-                );
-              }
-              resolve();
-            });
-            child.on("error", (err) => {
-              console.log(
-                isZh
-                  ? picocolors.red(`\n✖ 无法启动测试程序: ${err.message}`)
-                  : picocolors.red(
-                      `\n✖ Failed to start tests: ${err.message}`,
-                    ),
-              );
-              resolve();
-            });
-          });
-
-          if (wasActive) tui.start(config.budgetLimit);
-        } catch (err: any) {
-          console.log(
-            isZh
-              ? picocolors.red(`执行测试失败: ${err.message}`)
-              : picocolors.red(`Failed to execute tests: ${err.message}`),
-          );
-        }
-        return { shouldExit: false, processed: true };
-      }
 
       if (command === "/add") {
-        const fileArg = parts.slice(1).join(" ").trim();
+        let fileArg = parts.slice(1).join(" ").trim();
         const isZh = config.language === "zh";
         const candidates = this.getCandidates();
+
+        let readOnly = false;
+        if (
+          fileArg.startsWith("--read-only ") ||
+          fileArg.startsWith("--readonly ") ||
+          fileArg.startsWith("-r ")
+        ) {
+          readOnly = true;
+          fileArg = fileArg.replace(/^(--read-only|--readonly|-r)\s+/, "").trim();
+        } else if (
+          fileArg === "--read-only" ||
+          fileArg === "--readonly" ||
+          fileArg === "-r"
+        ) {
+          readOnly = true;
+          fileArg = "";
+        }
+
         if (!fileArg) {
           const wasActive = useFullscreenTui && tui.isActive;
           if (wasActive) tui.stop();
@@ -1584,25 +1121,44 @@ export class CommandRouter {
                 const options = filtered.map((f: string) => ({ value: f, label: f }));
                 const selected = await Prompt.askMultiSelect(
                   isZh
-                    ? "选择要添加到上下文的文件："
-                    : "Select files to add to the context:",
+                    ? readOnly
+                      ? "选择要添加到上下文的只读参考文件："
+                      : "选择要添加到上下文的文件："
+                    : readOnly
+                      ? "Select files to add as read-only reference context:"
+                      : "Select files to add to the context:",
                   options,
                 );
                 if (selected && selected.length > 0) {
                   for (const f of selected) {
-                    loop.addRelevantFilePublic(
-                      f,
-                      "Manually added via interactive /add",
-                    );
+                    if (readOnly) {
+                      loop.addReadOnlyFilePublic(
+                        f,
+                        "Manually added via interactive /add --read-only",
+                      );
+                    } else {
+                      loop.addRelevantFilePublic(
+                        f,
+                        "Manually added via interactive /add",
+                      );
+                    }
                   }
                   console.log(
                     isZh
-                      ? picocolors.green(
-                          `✔ 成功添加 ${selected.length} 个文件到上下文。`,
-                        )
-                      : picocolors.green(
-                          `✔ Added ${selected.length} file(s) to active context.`,
-                        ),
+                      ? readOnly
+                        ? picocolors.green(
+                            `✔ 成功添加 ${selected.length} 个只读文件到上下文。`,
+                          )
+                        : picocolors.green(
+                            `✔ 成功添加 ${selected.length} 个文件到上下文。`,
+                          )
+                      : readOnly
+                        ? picocolors.green(
+                            `✔ Added ${selected.length} read-only file(s) to active context.`,
+                          )
+                        : picocolors.green(
+                            `✔ Added ${selected.length} file(s) to active context.`,
+                          ),
                   );
                 } else {
                   console.log(
@@ -1638,260 +1194,113 @@ export class CommandRouter {
               f.toLowerCase().endsWith("/" + fileArg.toLowerCase()),
           );
           if (matched.length === 1) {
-            loop.addRelevantFilePublic(matched[0], "Fuzzy matched via /add");
-            console.log(
-              isZh
-                ? picocolors.green(`✔ 自动匹配并添加文件: ${matched[0]}`)
-                : picocolors.green(
-                    `✔ Auto-matched and added file: ${matched[0]}`,
-                  ),
-            );
-            tui.syncFromLoop(loop);
-            return { shouldExit: false, processed: true };
-          } else if (matched.length > 1) {
-            console.log(
-              isZh
-                ? picocolors.yellow(
-                    `找到多个匹配文件，请精确输入路径或使用无参交互选择:\n${matched.map((m: string) => `  • ${m}`).join("\n")}`,
-                  )
-                : picocolors.yellow(
-                    `Multiple matches found, please specify or use interactive select:\n${matched.map((m: string) => `  • ${m}`).join("\n")}`,
-                  ),
-            );
-            return { shouldExit: false, processed: true };
-          }
-          console.log(
-            isZh
-              ? picocolors.red(`文件不存在: ${fileArg}`)
-              : picocolors.red(`File does not exist: ${fileArg}`),
-          );
-          return { shouldExit: false, processed: true };
-        }
-
-        try {
-          const stat = statSync(absPath);
-          if (stat.isDirectory()) {
-            const files = await glob("**/*", {
-              cwd: absPath,
-              onlyFiles: true,
-              suppressErrors: true,
-            });
-            for (const f of files) {
-              const subRelPath = join(relPath, f).replace(/\\/g, "/");
-              loop.addRelevantFilePublic(
-                subRelPath,
-                "Manually added directory via /add",
-              );
-            }
-            console.log(
-              isZh
-                ? picocolors.green(
-                    `✔ 成功添加目录 ${relPath} 下的所有文件到上下文。`,
-                  )
-                : picocolors.green(
-                    `✔ Added all files in directory ${relPath} to active context.`,
-                  ),
-            );
-          } else {
-            loop.addRelevantFilePublic(
-              relPath,
-              "Manually added file via /add",
-            );
-            console.log(
-              isZh
-                ? picocolors.green(`✔ 已将 ${relPath} 添加到上下文。`)
-                : picocolors.green(`✔ Added ${relPath} to active context.`),
-            );
-          }
-          tui.syncFromLoop(loop);
-        } catch (err: any) {
-          console.log(
-            isZh
-              ? picocolors.red(`添加失败: ${err.message}`)
-              : picocolors.red(`Failed to add: ${err.message}`),
-          );
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/read-only" || command === "/readonly") {
-        const fileArg = parts.slice(1).join(" ").trim();
-        const isZh = config.language === "zh";
-        const candidates = this.getCandidates();
-        if (!fileArg) {
-          const wasActive = useFullscreenTui && tui.isActive;
-          if (wasActive) tui.stop();
-
-          try {
-            if (
-              !candidates ||
-              !candidates.files ||
-              candidates.files.length === 0
-            ) {
-              console.log(
-                isZh
-                  ? picocolors.yellow("工作区未找到可添加的文件。")
-                  : picocolors.yellow(
-                      "No files found in the workspace to add.",
-                    ),
-              );
-            } else {
-              const filterQuery = await Prompt.askText(
-                isZh
-                  ? "输入文件名过滤词（支持模糊匹配，直接回车列出所有）："
-                  : "Enter filename filter query (fuzzy, press Enter for all):",
-              );
-
-              if (filterQuery === null) {
-                console.log(
-                  isZh
-                    ? picocolors.yellow("操作已取消。")
-                    : picocolors.yellow("Operation cancelled."),
-                );
-                return { shouldExit: false, processed: true };
-              }
-
-              let filtered = candidates.files;
-              if (filterQuery.trim()) {
-                const q = filterQuery.trim().toLowerCase();
-                filtered = candidates.files.filter((f: string) =>
-                  f.toLowerCase().includes(q),
-                );
-              }
-
-              if (filtered.length === 0) {
-                console.log(
-                  isZh
-                    ? picocolors.yellow("未找到匹配过滤词的文件。")
-                    : picocolors.yellow("No matching files found."),
-                );
-              } else {
-                const options = filtered.map((f: string) => ({ value: f, label: f }));
-                const selected = await Prompt.askMultiSelect(
-                  isZh
-                    ? "选择要添加到上下文的只读参考文件："
-                    : "Select files to add as read-only reference context:",
-                  options,
-                );
-                if (selected && selected.length > 0) {
-                  for (const f of selected) {
-                    loop.addReadOnlyFilePublic(
-                      f,
-                      "Manually added via interactive /read-only",
-                    );
-                  }
-                  console.log(
-                    isZh
-                      ? picocolors.green(
-                          `✔ 成功添加 ${selected.length} 个只读文件到上下文。`,
-                        )
-                      : picocolors.green(
-                          `✔ Added ${selected.length} read-only file(s) to active context.`,
-                        ),
-                  );
-                } else {
-                  console.log(
-                    isZh
-                      ? picocolors.yellow("未选择任何文件。")
-                      : picocolors.yellow("No files selected."),
-                  );
-                }
-              }
-            }
-          } catch (err: any) {
-            console.log(
-              isZh
-                ? picocolors.red(`选择文件失败: ${err.message}`)
-                : picocolors.red(`Failed to select files: ${err.message}`),
-            );
-          } finally {
-            tui.syncFromLoop(loop);
-            if (wasActive) tui.start(config.budgetLimit);
-          }
-          return { shouldExit: false, processed: true };
-        }
-
-        const { isAbsolute, relative, resolve: pathResolve } = await import("path");
-        const { statSync } = await import("fs");
-        const absPath = isAbsolute(fileArg) ? fileArg : pathResolve(cwd, fileArg);
-        const relPath = relative(cwd, absPath).replace(/\\/g, "/");
-
-        if (!existsSync(absPath)) {
-          const matched = (candidates?.files || []).filter(
-            (f: string) =>
-              f.toLowerCase().includes(fileArg.toLowerCase()) ||
-              f.toLowerCase().endsWith("/" + fileArg.toLowerCase()),
-          );
-          if (matched.length === 1) {
-            loop.addReadOnlyFilePublic(
-              matched[0],
-              "Fuzzy matched via /read-only",
-            );
-            console.log(
-              isZh
-                ? picocolors.green(
-                    `✔ 自动匹配并添加只读参考文件: ${matched[0]}`,
-                  )
-                : picocolors.green(
-                    `✔ Auto-matched and added read-only reference: ${matched[0]}`,
-                  ),
-            );
-            tui.syncFromLoop(loop);
-            return { shouldExit: false, processed: true };
-          } else if (matched.length > 1) {
-            console.log(
-              isZh
-                ? picocolors.yellow(
-                    `找到多个匹配文件，请精确输入路径或使用无参交互选择:\n${matched.map((m: string) => `  • ${m}`).join("\n")}`,
-                  )
-                : picocolors.yellow(
-                    `Multiple matches found, please specify or use interactive select:\n${matched.map((m: string) => `  • ${m}`).join("\n")}`,
-                  ),
-            );
-            return { shouldExit: false, processed: true };
-          }
-          console.log(
-            isZh
-              ? picocolors.red(`文件不存在: ${fileArg}`)
-              : picocolors.red(`File does not exist: ${fileArg}`),
-          );
-          return { shouldExit: false, processed: true };
-        }
-
-        try {
-          const stat = statSync(absPath);
-          if (stat.isDirectory()) {
-            const files = await glob("**/*", {
-              cwd: absPath,
-              onlyFiles: true,
-              suppressErrors: true,
-            });
-            for (const f of files) {
-              const subRelPath = join(relPath, f).replace(/\\/g, "/");
+            if (readOnly) {
               loop.addReadOnlyFilePublic(
-                subRelPath,
-                "Manually added directory via /read-only",
+                matched[0],
+                "Fuzzy matched via /add --read-only",
               );
+              console.log(
+                isZh
+                  ? picocolors.green(`✔ 自动匹配并添加只读文件: ${matched[0]}`)
+                  : picocolors.green(
+                      `✔ Auto-matched and added read-only file: ${matched[0]}`,
+                    ),
+              );
+            } else {
+              loop.addRelevantFilePublic(matched[0], "Fuzzy matched via /add");
+              console.log(
+                isZh
+                  ? picocolors.green(`✔ 自动匹配并添加文件: ${matched[0]}`)
+                  : picocolors.green(
+                      `✔ Auto-matched and added file: ${matched[0]}`,
+                    ),
+              );
+            }
+            tui.syncFromLoop(loop);
+            return { shouldExit: false, processed: true };
+          } else if (matched.length > 1) {
+            console.log(
+              isZh
+                ? picocolors.yellow(
+                    `找到多个匹配文件，请精确输入路径或使用无参交互选择:\n${matched.map((m: string) => `  • ${m}`).join("\n")}`,
+                  )
+                : picocolors.yellow(
+                    `Multiple matches found, please specify or use interactive select:\n${matched.map((m: string) => `  • ${m}`).join("\n")}`,
+                  ),
+            );
+            return { shouldExit: false, processed: true };
+          }
+          console.log(
+            isZh
+              ? picocolors.red(`文件不存在: ${fileArg}`)
+              : picocolors.red(`File does not exist: ${fileArg}`),
+          );
+          return { shouldExit: false, processed: true };
+        }
+
+        try {
+          const stat = statSync(absPath);
+          if (stat.isDirectory()) {
+            const files = await glob("**/*", {
+              cwd: absPath,
+              onlyFiles: true,
+              suppressErrors: true,
+            });
+            for (const f of files) {
+              const subRelPath = join(relPath, f).replace(/\\/g, "/");
+              if (readOnly) {
+                loop.addReadOnlyFilePublic(
+                  subRelPath,
+                  "Manually added directory via /add --read-only",
+                );
+              } else {
+                loop.addRelevantFilePublic(
+                  subRelPath,
+                  "Manually added directory via /add",
+                );
+              }
             }
             console.log(
               isZh
-                ? picocolors.green(
-                    `✔ 成功添加目录 ${relPath} 下的所有只读文件。`,
-                  )
-                : picocolors.green(
-                    `✔ Added all files in directory ${relPath} as read-only references.`,
-                  ),
+                ? readOnly
+                  ? picocolors.green(
+                      `✔ 成功添加目录 ${relPath} 下的所有只读文件到上下文。`,
+                    )
+                  : picocolors.green(
+                      `✔ 成功添加目录 ${relPath} 下的所有文件到上下文。`,
+                    )
+                : readOnly
+                  ? picocolors.green(
+                      `✔ Added all files in directory ${relPath} as read-only to active context.`,
+                    )
+                  : picocolors.green(
+                      `✔ Added all files in directory ${relPath} to active context.`,
+                    ),
             );
           } else {
-            loop.addReadOnlyFilePublic(
-              relPath,
-              "Manually added file via /read-only",
-            );
-            console.log(
-              isZh
-                ? picocolors.green(`✔ 已将只读文件 ${relPath} 添加到上下文。`)
-                : picocolors.green(`✔ Added read-only reference ${relPath} to active context.`),
-            );
+            if (readOnly) {
+              loop.addReadOnlyFilePublic(
+                relPath,
+                "Manually added file via /add --read-only",
+              );
+              console.log(
+                isZh
+                  ? picocolors.green(`✔ 已将只读文件 ${relPath} 添加到上下文。`)
+                  : picocolors.green(
+                      `✔ Added read-only file ${relPath} to active context.`,
+                    ),
+              );
+            } else {
+              loop.addRelevantFilePublic(
+                relPath,
+                "Manually added file via /add",
+              );
+              console.log(
+                isZh
+                  ? picocolors.green(`✔ 已将 ${relPath} 添加到上下文。`)
+                  : picocolors.green(`✔ Added ${relPath} to active context.`),
+              );
+            }
           }
           tui.syncFromLoop(loop);
         } catch (err: any) {
@@ -2021,557 +1430,12 @@ export class CommandRouter {
         return { shouldExit: false, processed: true };
       }
 
-      if (command === "/context") {
-        const files = loop.getRelevantFiles();
-        const isZh = config.language === "zh";
-        if (files.length === 0) {
-          console.log(
-            isZh
-              ? picocolors.yellow(
-                  "当前活动上下文为空。可使用 /add <file> 添加文件。",
-                )
-              : picocolors.yellow(
-                  "No files in the active context. Use /add <file> to add files.",
-                ),
-          );
-        } else {
-          console.log(
-            isZh
-              ? picocolors.bold(
-                  picocolors.cyan("\n--- 当前活动上下文文件 ---"),
-                )
-              : picocolors.bold(
-                  picocolors.cyan("\n--- Active Context Files ---"),
-                ),
-          );
-
-          let totalEstimatedTokens = 0;
-          const fileTokensList: {
-            path: string;
-            reason: string;
-            tokens: number;
-            sizeBytes: number;
-            readOnly?: boolean;
-          }[] = [];
-          const fs = await import("fs");
-
-          for (const f of files) {
-            let tokens = 0;
-            let sizeBytes = 0;
-            try {
-              const fullPath = resolveSafePath(cwd, f.path);
-              if (fs.existsSync(fullPath)) {
-                const stat = fs.statSync(fullPath);
-                if (stat.isFile()) {
-                  sizeBytes = stat.size;
-                  const content = fs.readFileSync(fullPath, "utf8");
-                  // Simple heuristic: 1 token ~ 4 characters
-                  tokens = Math.ceil(content.length / 4);
-                }
-              }
-            } catch {
-              // Ignore file read issues
-            }
-
-            totalEstimatedTokens += tokens;
-            fileTokensList.push({
-              path: f.path,
-              reason: f.reason,
-              tokens,
-              sizeBytes,
-              readOnly: (f as any).readOnly,
-            });
-          }
-
-          for (const f of fileTokensList) {
-            const sizeStr =
-              f.sizeBytes > 1024
-                ? `${(f.sizeBytes / 1024).toFixed(1)} KB`
-                : `${f.sizeBytes} B`;
-            const roLabel = (f as any).readOnly
-              ? picocolors.yellow(" [RO]")
-              : "";
-            console.log(
-              `${picocolors.green("•")} ${picocolors.white(f.path)}${roLabel} ${picocolors.gray(`(${f.reason})`)} - ${picocolors.cyan(`~${f.tokens} tokens`)} (${sizeStr})`,
-            );
-          }
-
-          // Visual Progress Bar (assuming 128k context budget for reference, or customize based on model)
-          const contextBudget = 128000;
-          const percentage = Math.min(
-            100,
-            Math.ceil((totalEstimatedTokens / contextBudget) * 100),
-          );
-          const barWidth = 30;
-          const filledWidth = Math.ceil((percentage / 100) * barWidth);
-          const emptyWidth = barWidth - filledWidth;
-          const progressBar = `[${"█".repeat(filledWidth)}${"░".repeat(emptyWidth)}]`;
-
-          console.log(
-            isZh
-              ? `\n📊 上下文容量使用率: ${picocolors.yellow(`${percentage}%`)} ${progressBar} (预估: ${totalEstimatedTokens} / ${contextBudget} tokens)`
-              : `\n📊 Context Utilization: ${picocolors.yellow(`${percentage}%`)} ${progressBar} (Estimated: ${totalEstimatedTokens} / ${contextBudget} tokens)`,
-          );
-
-          // Warnings / Suggestions
-          const largeFiles = fileTokensList.filter(
-            (f) => f.sizeBytes > 50 * 1024,
-          );
-          if (largeFiles.length > 0) {
-            console.log(
-              picocolors.yellow(
-                isZh ? "\n⚠️ 优化建议:" : "\n⚠️ Optimization Suggestions:",
-              ),
-            );
-            for (const f of largeFiles) {
-              console.log(
-                isZh
-                  ? `  - 文件 ${picocolors.red(f.path)} 体积过大 (>${(f.sizeBytes / 1024).toFixed(1)} KB)，可能会占用大量 Prompt Token，建议使用 /drop 移除或只添加相关部分。`
-                  : `  - File ${picocolors.red(f.path)} is abnormally large (>${(f.sizeBytes / 1024).toFixed(1)} KB), which may exhaust prompt tokens. Consider using /drop to remove it.`,
-              );
-            }
-          }
-          console.log("");
-        }
-        return { shouldExit: false, processed: true };
-      }
-
       if (command === "/clear") {
         console.clear();
         return { shouldExit: false, processed: true };
       }
 
-      if (command === "/compact") {
-        console.log("Compacting history...");
-        const history = loop.getHistory();
-        if (history.length > 12) {
-          const systemMsg = history[0];
-          let partitionIdx = history.length - 10;
-          while (partitionIdx > 1) {
-            const msg = history[partitionIdx];
-            if (msg.role === "tool") {
-              partitionIdx--;
-              continue;
-            }
-            const prevMsg = history[partitionIdx - 1];
-            const hasToolCalls = prevMsg.content.some(
-              (c: any) => c.type === "tool_call",
-            );
-            if (prevMsg.role === "assistant" && hasToolCalls) {
-              partitionIdx--;
-              continue;
-            }
-            break;
-          }
-          const discarded = history.slice(1, partitionIdx);
-          const recentMsgs = history.slice(partitionIdx);
 
-          let rawText = "";
-          for (const msg of discarded) {
-            rawText +=
-              `[${msg.role.toUpperCase()}]: ` +
-              msg.content
-                .map((c: any) => {
-                  if (c.type === "text") return c.text;
-                  if (c.type === "tool_call")
-                    return `[Tool Call: ${c.toolCall?.name}]`;
-                  if (c.type === "tool_result")
-                    return `[Tool Result: ${c.toolResult?.name}]`;
-                  return "";
-                })
-                .join(" ") +
-              "\n";
-          }
-
-          console.log("Generating session summary via LLM...");
-          let summaryText = "Prior dialogue history compacted.";
-          try {
-            const fastModel = config.models.fast || config.models.default;
-            const stream = this.providerInstance.chat({
-              model: fastModel,
-              messages: [
-                {
-                  id: `msg_compact_${Date.now()}`,
-                  role: "user",
-                  createdAt: new Date().toISOString(),
-                  content: [
-                    {
-                      type: "text",
-                      text: `Summarize the following dialog history of an AI coding session in a brief, concise paragraph (max 150 words). Focus on what files were modified, what tasks were accomplished, and any critical developer rules established. Do not include introductory text, just the summary:\n\n${rawText.substring(0, 15000)}`,
-                    },
-                  ],
-                },
-              ],
-              tools: [],
-            });
-
-            let responseContent = "";
-            for await (const event of stream) {
-              if (event.type === "text_delta") {
-                responseContent += event.text;
-              }
-            }
-            if (responseContent.trim()) {
-              summaryText = responseContent.trim();
-            }
-          } catch (err: any) {
-            console.log(
-              picocolors.yellow(
-                `⚠ LLM compaction query failed: ${err.message}. Using default compaction.`,
-              ),
-            );
-          }
-
-          const summaryMsg = {
-            id: `msg_summary_${Date.now()}`,
-            role: "system",
-            createdAt: new Date().toISOString(),
-            content: [
-              {
-                type: "text",
-                text: `Prior session history summary:\n${summaryText}`,
-              },
-            ],
-          };
-
-          history.length = 0;
-          if (systemMsg) {
-            history.push(systemMsg);
-          }
-          history.push(summaryMsg);
-          history.push(...recentMsgs);
-          (loop as any).sessionManager.saveHistory(history);
-
-          console.log(
-            picocolors.green(
-              `✔ History compacted! Retained first system message, generated history summary, and last 10 messages. Total: ${history.length}`,
-            ),
-          );
-        } else {
-          console.log(picocolors.yellow("History is too short to compact."));
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/history") {
-        const history = loop.getHistory();
-        let fullHistoryText = picocolors.bold(
-          picocolors.cyan(
-            "\n=== Orbit Session Complete Dialogue History ===\n\n",
-          ),
-        );
-
-        for (const msg of history) {
-          if (msg.role === "user") {
-            const text = msg.content
-              .map((c: any) => (c.type === "text" ? c.text : ""))
-              .join("");
-            fullHistoryText += `${picocolors.cyan("orbit >")} ${picocolors.bold(picocolors.white(text))}\n\n`;
-          } else if (msg.role === "assistant") {
-            const text = msg.content
-              .map((c: any) => {
-                if (c.type === "text") return c.text;
-                if (c.type === "tool_call")
-                  return `[Tool Call: ${c.toolCall?.name} arguments: ${c.toolCall?.arguments}]`;
-                return "";
-              })
-              .join("\n");
-            if (text.trim()) {
-              const { Renderer: tuiRenderer } = await import("@orbit-ai/tui");
-              fullHistoryText += tuiRenderer.formatMarkdown(text) + "\n\n";
-            }
-          } else if (msg.role === "tool") {
-            const text = msg.content
-              .map((c: any) =>
-                c.type === "tool_result"
-                  ? `[Tool Result: ${c.toolResult?.name} status: ${c.toolResult?.status || "success"}]`
-                  : "",
-              )
-              .join("\n");
-            if (text.trim()) {
-              fullHistoryText += picocolors.dim(text) + "\n\n";
-            }
-          }
-        }
-        fullHistoryText += picocolors.cyan(
-          "================================================\n",
-        );
-
-        const wasActive = useFullscreenTui;
-        if (wasActive) tui.stop();
-        const { pageText } = await import("../tui/FullscreenTui.js");
-        await pageText(fullHistoryText);
-        if (wasActive) tui.start(config.budgetLimit);
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/inspect") {
-        const indexPath = join(cwd, ".orbit", "symbols.json");
-        if (!existsSync(indexPath)) {
-          this.printOutput(
-            picocolors.yellow(
-              "No symbols index found. Please run a task first to generate the symbol map.",
-            ),
-          );
-          return { shouldExit: false, processed: true };
-        }
-
-        try {
-          const raw = readFileSync(indexPath, "utf8");
-          const index = JSON.parse(raw);
-          if (index.files && typeof index.files === "object") {
-            const outlineLines: string[] = [];
-            outlineLines.push(
-              picocolors.bold(
-                picocolors.cyan(
-                  "\n=== CodeWhale Codebase Visual Outline ===",
-                ),
-              ),
-            );
-
-            let totalFiles = 0;
-            let totalSymbols = 0;
-            let tsFiles = 0;
-
-            for (const [file, fileData] of Object.entries(index.files)) {
-              totalFiles++;
-              if (file.endsWith(".ts") || file.endsWith(".tsx")) {
-                tsFiles++;
-              }
-              const data = fileData as any;
-              if (data && Array.isArray(data.symbols)) {
-                outlineLines.push(
-                  `  📄 ${picocolors.bold(picocolors.blue(file))}`,
-                );
-                for (const sym of data.symbols) {
-                  totalSymbols++;
-                  const symbolColor =
-                    sym.type === "class"
-                      ? picocolors.magenta
-                      : picocolors.green;
-                  outlineLines.push(
-                    `     • ${symbolColor(sym.name)} (${picocolors.gray(sym.type)})`,
-                  );
-                }
-              }
-            }
-
-            const tsRatio =
-              totalFiles > 0
-                ? ((tsFiles / totalFiles) * 100).toFixed(1)
-                : "0.0";
-            outlineLines.push(
-              picocolors.gray("========================================="),
-            );
-            outlineLines.push(`  ${picocolors.bold("Codebase Stats:")}`);
-            outlineLines.push(
-              `    • Total Indexed Files: ${picocolors.green(totalFiles)}`,
-            );
-            outlineLines.push(
-              `    • TypeScript Ratio   : ${picocolors.yellow(tsRatio + "%")}`,
-            );
-            outlineLines.push(
-              `    • Exported Symbols   : ${picocolors.magenta(totalSymbols)}`,
-            );
-            outlineLines.push(
-              picocolors.cyan("=========================================\n"),
-            );
-
-            const wasActive = useFullscreenTui;
-            if (wasActive) tui.stop();
-            const { pageText } = await import("../tui/FullscreenTui.js");
-            await pageText(outlineLines.join("\n"));
-            if (wasActive) tui.start(config.budgetLimit);
-          }
-        } catch (err: any) {
-          this.printOutput(
-            picocolors.red(`Failed to parse symbol index: ${err.message}`),
-          );
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/doc") {
-        const fileArg = parts.slice(1).join(" ").trim();
-        if (!fileArg) {
-          this.printOutput(picocolors.yellow("Usage: /doc <file_path>"));
-          return { shouldExit: false, processed: true };
-        }
-
-        let targetFilePath: string;
-        try {
-          targetFilePath = resolveSafePath(cwd, fileArg);
-        } catch (err: any) {
-          this.printOutput(picocolors.red(`Error: ${err.message}`));
-          return { shouldExit: false, processed: true };
-        }
-        if (!existsSync(targetFilePath)) {
-          this.printOutput(picocolors.red(`Error: File not found: ${fileArg}`));
-          return { shouldExit: false, processed: true };
-        }
-
-        this.printOutput(
-          picocolors.cyan(
-            `Generating documentation for ${fileArg} via LLM...`,
-          ),
-        );
-        try {
-          const content = readFileSync(targetFilePath, "utf8");
-          const fastModel = config.models.fast || config.models.default;
-
-          const stream = this.providerInstance.chat({
-            model: fastModel,
-            messages: [
-              {
-                id: `msg_doc_${Date.now()}`,
-                role: "user",
-                createdAt: new Date().toISOString(),
-                content: [
-                  {
-                    type: "text",
-                    text: `Analyze the following code file and add clean, professional TSDoc/JSDoc comments for all exported functions, classes, interfaces, and methods. Preserve all existing logic, code, and comments exactly. Return ONLY the complete modified code file, with no markdown, no quotes, and no explanations:\n\n${content}`,
-                  },
-                ],
-              },
-            ],
-            tools: [],
-          });
-
-          let documentedCode = "";
-          for await (const event of stream) {
-            if (event.type === "text_delta") {
-              documentedCode += event.text;
-            }
-          }
-
-          documentedCode = documentedCode
-            .trim()
-            .replace(/^```[a-zA-Z]*\n/, "")
-            .replace(/\n```$/, "");
-          if (!documentedCode) {
-            this.printOutput(
-              picocolors.red("Failed to generate documented code."),
-            );
-            return { shouldExit: false, processed: true };
-          }
-
-          const state = (loop as any).state;
-          state.task = `Add TSDoc/JSDoc comments to ${fileArg}`;
-          state.done = false;
-          state.attemptCount = 0;
-
-          const writeToolCall = {
-            id: `tc_doc_${Date.now()}`,
-            name: "write_file",
-            arguments: JSON.stringify({
-              path: targetFilePath,
-              content: documentedCode,
-            }),
-          };
-
-          state.history.push({
-            id: `msg_user_${Date.now()}`,
-            role: "user",
-            createdAt: new Date().toISOString(),
-            content: [
-              { type: "text", text: `Write JSDoc comments to ${fileArg}` },
-            ],
-          });
-
-          const assistantMsg = {
-            id: `msg_asst_doc_${Date.now()}`,
-            role: "assistant",
-            createdAt: new Date().toISOString(),
-            content: [{ type: "tool_call", toolCall: writeToolCall }],
-          };
-          state.history.push(assistantMsg);
-
-          await loop.run();
-        } catch (err: any) {
-          this.printOutput(
-            picocolors.red(
-              `Failed to generate documentation: ${err.message}`,
-            ),
-          );
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/diagnose") {
-        const testCommand =
-          (config.context?.testCommands && config.context.testCommands[0]) ||
-          "npm test";
-        this.printOutput(
-          picocolors.cyan(`Running test suite: "${testCommand}"...`),
-        );
-
-        const { exec } = await import("child_process");
-        const runTestPromise = () =>
-          new Promise<{ stdout: string; stderr: string; code: number }>(
-            (resolve) => {
-              exec(testCommand, { cwd }, (err, stdout, stderr) => {
-                resolve({
-                  stdout,
-                  stderr,
-                  code: err ? err.code || 1 : 0,
-                });
-              });
-            },
-          );
-
-        const testResult = await runTestPromise();
-        if (testResult.code === 0) {
-          this.printOutput(
-            picocolors.green(
-              `✔ All tests passed successfully! No diagnostics needed.`,
-            ),
-          );
-          return { shouldExit: false, processed: true };
-        }
-
-        this.printOutput(
-          picocolors.red(`✖ Tests failed! Outputting diagnostics...`),
-        );
-        this.printOutput(picocolors.gray(testResult.stdout || testResult.stderr));
-
-        const repairPrompt = `The test command "${testCommand}" failed. The output log is:\n\n${testResult.stdout || testResult.stderr}\n\nPlease analyze the failure logs, locate the files causing assertion or syntax errors, and fix the codebase so that the test suite passes successfully.`;
-
-        const confirmRepair = await Prompt.askApproval(
-          "Launch Agent Loop to auto-repair the test failures?",
-        );
-        if (!confirmRepair) {
-          this.printOutput(picocolors.yellow("Diagnostics aborted."));
-          return { shouldExit: false, processed: true };
-        }
-
-        const state = (loop as any).state;
-        state.task = `Auto-repair test failures for "${testCommand}"`;
-        state.done = false;
-        state.attemptCount = 0;
-
-        state.history.push({
-          id: `msg_user_${Date.now()}`,
-          role: "user",
-          createdAt: new Date().toISOString(),
-          content: [{ type: "text", text: repairPrompt }],
-        });
-
-        if (multi) {
-          const orchestrator = new Orchestrator(
-            cwd,
-            config,
-            this.providerInstance,
-            repairPrompt,
-            tuiInteraction,
-          );
-          await orchestrator.run();
-        } else {
-          await loop.run();
-        }
-        tui.syncFromLoop(loop);
-        tui.finishAttempt();
-        return { shouldExit: false, processed: true };
-      }
 
       if (command === "/chat") {
         const wasActive = useFullscreenTui && tui.isActive;
@@ -2704,10 +1568,10 @@ export class CommandRouter {
                 label: "Cancel",
               });
               stopTuiIfNeeded();
-              idToDelete = await Prompt.askSelect(
+              idToDelete = (await Prompt.askSelect(
                 "Choose a session to delete:",
                 deleteOptions,
-              );
+              )) ?? "";
             } else {
               // Check if index was provided instead of full id
               const idx = parseInt(idToDelete, 10);
@@ -2733,13 +1597,13 @@ export class CommandRouter {
             let confirm = "yes";
             if (!arg) {
               stopTuiIfNeeded();
-              confirm = await Prompt.askSelect(
+              confirm = (await Prompt.askSelect(
                 `Are you sure you want to delete session ${idToDelete}?`,
                 [
                   { value: "yes", label: "Yes, delete it" },
                   { value: "no", label: "No, cancel" },
                 ],
-              );
+              )) ?? "no";
             }
 
             if (confirm === "yes") {
@@ -2858,6 +1722,7 @@ export class CommandRouter {
             label: "Cancel",
           });
 
+          stopTuiIfNeeded();
           const selectedSessionId = await Prompt.askSelect(
             "Choose a session to load:",
             sessionOptions,
@@ -2944,757 +1809,9 @@ export class CommandRouter {
         return { shouldExit: false, processed: true };
       }
 
-      if (command === "/resolve") {
-        const fileArg = parts.slice(1).join(" ").trim();
-        if (!fileArg) {
-          console.log(picocolors.yellow("Usage: /resolve <file_path>"));
-          return { shouldExit: false, processed: true };
-        }
-
-        let targetFilePath: string;
-        try {
-          targetFilePath = resolveSafePath(cwd, fileArg);
-        } catch (err: any) {
-          console.log(picocolors.red(`Error: ${err.message}`));
-          return { shouldExit: false, processed: true };
-        }
-        if (!existsSync(targetFilePath)) {
-          console.log(picocolors.red(`Error: File not found: ${fileArg}`));
-          return { shouldExit: false, processed: true };
-        }
-
-        try {
-          const content = readFileSync(targetFilePath, "utf8");
-          if (
-            !content.includes("<<<<<<<") ||
-            !content.includes("=======") ||
-            !content.includes(">>>>>>>")
-          ) {
-            console.log(
-              picocolors.yellow(
-                "No git merge conflict markers found in this file.",
-              ),
-            );
-            return { shouldExit: false, processed: true };
-          }
-
-          console.log(
-            picocolors.cyan(`Resolving conflicts in ${fileArg} via LLM...`),
-          );
-          const fastModel = config.models.fast || config.models.default;
-
-          const stream = this.providerInstance.chat({
-            model: fastModel,
-            messages: [
-              {
-                id: `msg_resolve_${Date.now()}`,
-                role: "user",
-                createdAt: new Date().toISOString(),
-                content: [
-                  {
-                    type: "text",
-                    text: `Resolve the git merge conflict markers in this file. Merge the changes logically. Preserve all other code structure and logic exactly. Return ONLY the complete resolved code file, with no markdown, no quotes, and no explanations:\n\n${content}`,
-                  },
-                ],
-              },
-            ],
-            tools: [],
-          });
-
-          let resolvedCode = "";
-          for await (const event of stream) {
-            if (event.type === "text_delta") {
-              resolvedCode += event.text;
-            }
-          }
-
-          resolvedCode = resolvedCode
-            .trim()
-            .replace(/^```[a-zA-Z]*\n/, "")
-            .replace(/\n```$/, "");
-          if (!resolvedCode) {
-            console.log(picocolors.red("Failed to generate resolved code."));
-            return { shouldExit: false, processed: true };
-          }
-
-          const state = (loop as any).state;
-          state.task = `Resolve git merge conflicts in ${fileArg}`;
-          state.done = false;
-          state.attemptCount = 0;
-
-          const writeToolCall = {
-            id: `tc_resolve_${Date.now()}`,
-            name: "write_file",
-            arguments: JSON.stringify({
-              path: targetFilePath,
-              content: resolvedCode,
-            }),
-          };
-
-          state.history.push({
-            id: `msg_user_${Date.now()}`,
-            role: "user",
-            createdAt: new Date().toISOString(),
-            content: [
-              {
-                type: "text",
-                text: `Resolve git merge conflicts in ${fileArg}`,
-              },
-            ],
-          });
-
-          const assistantMsg = {
-            id: `msg_asst_resolve_${Date.now()}`,
-            role: "assistant",
-            createdAt: new Date().toISOString(),
-            content: [{ type: "tool_call", toolCall: writeToolCall }],
-          };
-          state.history.push(assistantMsg);
-
-          await loop.run();
-          tui.syncFromLoop(loop);
-          tui.finishAttempt();
-        } catch (err: any) {
-          console.log(
-            picocolors.red(`Failed to resolve conflicts: ${err.message}`),
-          );
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/references") {
-        const symbolArg = parts.slice(1).join(" ").trim();
-        if (!symbolArg) {
-          this.printOutput(picocolors.yellow("Usage: /references <symbol_name>"));
-          return { shouldExit: false, processed: true };
-        }
-
-        const indexPath = join(cwd, ".orbit", "symbols.json");
-        if (!existsSync(indexPath)) {
-          this.printOutput(
-            picocolors.yellow(
-              "No symbols index found. Please run a task first to generate the symbol map.",
-            ),
-          );
-          return { shouldExit: false, processed: true };
-        }
-
-        try {
-          const raw = readFileSync(indexPath, "utf8");
-          const index = JSON.parse(raw);
-          let exportedFile: string | null = null;
-          if (index.files && typeof index.files === "object") {
-            for (const [file, fileData] of Object.entries(index.files)) {
-              const data = fileData as any;
-              if (data && Array.isArray(data.symbols)) {
-                if (data.symbols.some((s: any) => s.name === symbolArg)) {
-                  exportedFile = file;
-                  break;
-                }
-              }
-            }
-
-            const refLines: string[] = [];
-            refLines.push(
-              picocolors.bold(
-                picocolors.cyan(
-                  `\n=== Symbol References Finder: ${symbolArg} ===`,
-                ),
-              ),
-            );
-            if (exportedFile) {
-              refLines.push(
-                `  🔑 Exported by: ${picocolors.green(exportedFile)}`,
-              );
-            } else {
-              refLines.push(
-                `  🔑 Exported by: ${picocolors.gray("Unknown (Internal / Not exported)")}`,
-              );
-            }
-            refLines.push(
-              picocolors.gray(
-                "===========================================================",
-              ),
-            );
-
-            let refCount = 0;
-            const symbolRegex = new RegExp(`\\b${symbolArg}\\b`);
-            for (const file of Object.keys(index.files)) {
-              const absPath = join(cwd, file);
-              if (existsSync(absPath)) {
-                const lines = readFileSync(absPath, "utf8").split("\n");
-                for (let idx = 0; idx < lines.length; idx++) {
-                  const line = lines[idx];
-                  const trimmedLine = line.trim();
-
-                  if (
-                    trimmedLine.startsWith("//") ||
-                    trimmedLine.startsWith("*") ||
-                    trimmedLine.startsWith("/*")
-                  ) {
-                    continue;
-                  }
-
-                  if (
-                    symbolRegex.test(line) &&
-                    !line.includes("export ") &&
-                    !line.includes("symbols.some")
-                  ) {
-                    refCount++;
-                    refLines.push(
-                      `  📁 ${picocolors.blue(file)}:${picocolors.yellow(idx + 1)}`,
-                    );
-                    refLines.push(
-                      `     ${picocolors.gray(line.trim().substring(0, 80))}`,
-                    );
-                  }
-                }
-              }
-            }
-
-            refLines.push(
-              picocolors.gray(
-                "===========================================================",
-              ),
-            );
-            refLines.push(
-              `  Total Usages Found: ${picocolors.green(refCount)}`,
-            );
-            refLines.push(
-              picocolors.cyan(
-                "===========================================================\n",
-              ),
-            );
-
-            const wasActive = useFullscreenTui;
-            if (wasActive) tui.stop();
-            const { pageText } = await import("../tui/FullscreenTui.js");
-            await pageText(refLines.join("\n"));
-            if (wasActive) tui.start(config.budgetLimit);
-          }
-        } catch (err: any) {
-          this.printOutput(
-            picocolors.red(`Failed to search references: ${err.message}`),
-          );
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/grep") {
-        const query = parts.slice(1).join(" ").trim();
+      if (command === "/mode") {
         const isZh = config.language === "zh";
-        if (!query) {
-          this.printOutput(
-            isZh
-              ? picocolors.yellow("用法: /grep <搜索内容>")
-              : picocolors.yellow("Usage: /grep <query_pattern>"),
-          );
-          return { shouldExit: false, processed: true };
-        }
-
-        const wasActive = useFullscreenTui && tui.isActive;
-        if (wasActive) tui.stop();
-
-        console.log(
-          isZh
-            ? picocolors.cyan(`\n正在搜索: "${query}"...`)
-            : picocolors.cyan(`\nSearching for: "${query}"...`),
-        );
-
-        const matches: Array<{ file: string; line: number; content: string }> =
-          [];
-
-        try {
-          // Try Ripgrep first
-          try {
-            const { execSync } = await import("child_process");
-            const rgOutput = execSync(
-              `rg --line-number --color=never --no-heading --glob "!.git/**" --glob "!node_modules/**" --glob "!dist/**" --glob "!build/**" --glob "!.orbit/**" "${query}"`,
-              {
-                cwd,
-                stdio: ["ignore", "pipe", "ignore"],
-              },
-            ).toString();
-
-            const lines = rgOutput.split("\n");
-            for (const line of lines) {
-              if (matches.length >= 100) break;
-              if (!line.trim()) continue;
-              const parts = line.split(":");
-              if (parts.length >= 3) {
-                const filePath = parts[0].replace(/\\/g, "/");
-                const lineNum = parseInt(parts[1], 10);
-                const content = parts.slice(2).join(":");
-                matches.push({ file: filePath, line: lineNum, content });
-              }
-            }
-          } catch {
-            // Fallback to JS search
-            const ignorePatterns = config.context?.ignore || [];
-            const allFiles = await glob("**/*", {
-              cwd,
-              ignore: ignorePatterns,
-              onlyFiles: true,
-              dot: true,
-              suppressErrors: true,
-            });
-
-            for (const file of allFiles) {
-              if (matches.length >= 100) break;
-              const filePath = join(cwd, file);
-              const content = readFileSync(filePath, "utf8");
-              if (content.includes(query)) {
-                const lines = content.split("\n");
-                for (let i = 0; i < lines.length; i++) {
-                  if (lines[i].includes(query)) {
-                    matches.push({
-                      file: file.replace(/\\/g, "/"),
-                      line: i + 1,
-                      content: lines[i],
-                    });
-                    if (matches.length >= 100) break;
-                  }
-                }
-              }
-            }
-          }
-
-          if (matches.length === 0) {
-            console.log(
-              isZh
-                ? picocolors.yellow("未找到匹配的代码行。")
-                : picocolors.yellow("No matches found."),
-            );
-          } else {
-            let resultsText = isZh
-              ? picocolors.bold(
-                  picocolors.cyan(
-                    `\n── 🔍 搜索结果 (共 ${matches.length} 项) ──\n`,
-                  ),
-                )
-              : picocolors.bold(
-                  picocolors.cyan(
-                    `\n── 🔍 Search Results (${matches.length} found) ──\n`,
-                  ),
-                );
-
-            const matchedFiles = Array.from(
-              new Set(matches.map((m) => m.file)),
-            );
-
-            for (const m of matches) {
-              resultsText += `${picocolors.green(m.file)}:${picocolors.yellow(m.line)}\n`;
-              resultsText += `  ${picocolors.gray(m.content.trim().substring(0, 100))}\n`;
-            }
-
-            const { pageText } = await import("../tui/FullscreenTui.js");
-            await pageText(resultsText);
-
-            console.log("");
-            const confirmAdd = await Prompt.askApproval(
-              isZh
-                ? `发现 ${matchedFiles.length} 个相关文件。是否将它们全部添加到活动上下文中？`
-                : `Found ${matchedFiles.length} file(s). Add all of them to the active context?`,
-            );
-
-            if (confirmAdd) {
-              for (const f of matchedFiles) {
-                loop.addRelevantFilePublic(
-                  f,
-                  `Matched query via /grep "${query}"`,
-                );
-              }
-              console.log(
-                isZh
-                  ? picocolors.green(
-                      `✔ 成功添加 ${matchedFiles.length} 个文件到上下文。`,
-                    )
-                  : picocolors.green(
-                      `✔ Added ${matchedFiles.length} file(s) to active context.`,
-                    ),
-              );
-            }
-          }
-
-          await Prompt.askText(
-            isZh
-              ? "按 Enter 键返回 Orbit..."
-              : "Press Enter to return to Orbit...",
-          );
-        } catch (err: any) {
-          console.log(
-            isZh
-              ? picocolors.red(`搜索失败: ${err.message}`)
-              : picocolors.red(`Search failed: ${err.message}`),
-          );
-        } finally {
-          tui.syncFromLoop(loop);
-          if (wasActive) tui.start(config.budgetLimit);
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/language") {
-        const langArg = parts.slice(1).join(" ").trim().toLowerCase();
-        const activeConfig = loop.getConfig();
-        let targetLang: "en" | "zh";
-
-        if (langArg === "zh" || langArg === "cn" || langArg === "chinese") {
-          targetLang = "zh";
-        } else if (
-          langArg === "en" ||
-          langArg === "us" ||
-          langArg === "english"
-        ) {
-          targetLang = "en";
-        } else if (!langArg) {
-          targetLang = activeConfig.language === "en" ? "zh" : "en";
-        } else {
-          const isZh = activeConfig.language === "zh";
-          this.printOutput(
-            isZh
-              ? picocolors.red("无效的语言参数。请使用: /language [en|zh]")
-              : picocolors.red(
-                  "Invalid language argument. Use: /language [en|zh]",
-                ),
-          );
-          return { shouldExit: false, processed: true };
-        }
-
-        activeConfig.language = targetLang;
-        config.language = targetLang;
-        if (tui && (tui as any).config) {
-          (tui as any).config.language = targetLang;
-        }
-
-        const { parse: yamlParse, stringify: yamlStringify } = await import("yaml");
-
-        const globalConfigPath = join(
-          homedir(),
-          ".orbit",
-          "config.yaml",
-        );
-        let globalConfig: any = {};
-        if (existsSync(globalConfigPath)) {
-          try {
-            const raw = readFileSync(globalConfigPath, "utf8");
-            globalConfig = yamlParse(raw) || {};
-          } catch {
-            globalConfig = {};
-          }
-        }
-        globalConfig.language = targetLang;
-        try {
-          const dir = dirname(globalConfigPath);
-          if (!existsSync(dir)) {
-            mkdirSync(dir, { recursive: true });
-          }
-          writeFileSync(globalConfigPath, yamlStringify(globalConfig), "utf8");
-
-          const isZh = targetLang === "zh";
-          this.printOutput(
-            isZh
-              ? picocolors.green(
-                  `✔ 语言已成功切换为：中文 (zh) 并保存至全局配置。`,
-                )
-              : picocolors.green(
-                  `✔ Language successfully switched to: English (en) and saved to global config.`,
-                ),
-          );
-        } catch (err: any) {
-          const isZh = targetLang === "zh";
-          this.printOutput(
-            isZh
-              ? picocolors.red(`无法保存全局配置: ${err.message}`)
-              : picocolors.red(
-                  `Failed to save global config: ${err.message}`,
-                ),
-          );
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/fork") {
-        const wasActive = useFullscreenTui && tui.isActive;
-        if (wasActive) tui.stop();
-        try {
-          const isZh = config.language === "zh";
-          const activeSessionId =
-            (loop as any).state?.sessionId ||
-            loop.sessionManager.getActiveSession()?.id;
-          if (!activeSessionId) {
-            console.log(
-              isZh
-                ? picocolors.red("✖ 没有活跃的会话可以 fork。")
-                : picocolors.red("✖ No active session to fork."),
-            );
-            return { shouldExit: false, processed: true };
-          }
-
-          const sub = parts[1]?.toLowerCase();
-          const sessionsDir = join(cwd, ".orbit", "sessions");
-
-          if (sub === "tree") {
-            const sessions: any[] = [];
-            if (existsSync(sessionsDir)) {
-              const dirs = readdirSync(sessionsDir);
-              for (const dir of dirs) {
-                const sessionFile = join(sessionsDir, dir, "session.json");
-                if (existsSync(sessionFile)) {
-                  try {
-                    const data = JSON.parse(
-                      readFileSync(sessionFile, "utf8"),
-                    );
-                    sessions.push(data);
-                  } catch {}
-                }
-              }
-            }
-
-            if (sessions.length === 0) {
-              console.log(
-                isZh
-                  ? picocolors.yellow("没有找到任何会话。")
-                  : picocolors.yellow("No sessions found."),
-              );
-              return { shouldExit: false, processed: true };
-            }
-
-            interface ExtendedNode {
-              id: string;
-              title: string;
-              parentId?: string;
-              model: string;
-              createdAt: string;
-              children: ExtendedNode[];
-              isActive: boolean;
-            }
-
-            const nodeMap = new Map<string, ExtendedNode>();
-            for (const s of sessions) {
-              nodeMap.set(s.id, {
-                id: s.id,
-                title: s.title || "Untitled",
-                parentId: s.parentId,
-                model: s.model || "",
-                createdAt: s.createdAt || "",
-                children: [],
-                isActive: s.id === activeSessionId,
-              });
-            }
-
-            const roots: ExtendedNode[] = [];
-            for (const node of nodeMap.values()) {
-              if (node.parentId && nodeMap.has(node.parentId)) {
-                nodeMap.get(node.parentId)!.children.push(node);
-              } else {
-                roots.push(node);
-              }
-            }
-
-            const sortNodes = (nodes: ExtendedNode[]) => {
-              nodes.sort(
-                (a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt),
-              );
-              for (const node of nodes) {
-                sortNodes(node.children);
-              }
-            };
-            sortNodes(roots);
-
-            console.log(
-              isZh
-                ? picocolors.bold(
-                    picocolors.cyan("\n=== Orbit 会话分支树 ===\n"),
-                  )
-                : picocolors.bold(
-                    picocolors.cyan("\n=== Orbit Session Branch Tree ===\n"),
-                  ),
-            );
-
-            const printTreeNode = (
-              node: ExtendedNode,
-              prefix: string,
-              isLast: boolean,
-            ) => {
-              const marker = node.isActive
-                ? picocolors.green("● (active) ")
-                : "  ";
-              const branchChar =
-                prefix === "" ? "" : isLast ? "└── " : "├── ";
-              const line = `${prefix}${branchChar}${marker}${picocolors.blue(node.id)} - ${node.title || "Untitled"} (${node.model})`;
-              console.log(line);
-
-              const nextPrefix =
-                prefix + (prefix === "" ? "" : isLast ? "    " : "│   ");
-              for (let i = 0; i < node.children.length; i++) {
-                printTreeNode(
-                  node.children[i],
-                  nextPrefix,
-                  i === node.children.length - 1,
-                );
-              }
-            };
-
-            for (let i = 0; i < roots.length; i++) {
-              printTreeNode(roots[i], "", i === roots.length - 1);
-            }
-            console.log(picocolors.cyan("=========================\n"));
-            return { shouldExit: false, processed: true };
-          }
-
-          if (sub === "switch") {
-            const sessions = loop.getSessions();
-            let targetId = parts.slice(2).join(" ").trim();
-            if (!targetId) {
-              console.log(
-                isZh
-                  ? picocolors.yellow("用法: /fork switch <会话ID | 索引>")
-                  : picocolors.yellow(
-                      "Usage: /fork switch <session_id | index>",
-                    ),
-              );
-              return { shouldExit: false, processed: true };
-            }
-            const idx = parseInt(targetId, 10);
-            if (!isNaN(idx) && idx >= 1 && idx <= sessions.length) {
-              targetId = sessions[idx - 1].id;
-            }
-            const found = sessions.find((s: any) => s.id === targetId);
-            if (!found) {
-              console.log(
-                isZh
-                  ? picocolors.red(`✖ 会话不存在: ${targetId}`)
-                  : picocolors.red(`✖ Session not found: ${targetId}`),
-              );
-              return { shouldExit: false, processed: true };
-            }
-
-            const success = loop.resumeSession(targetId);
-            if (success) {
-              tui.loadHistory(loop.getHistory());
-              console.log(
-                isZh
-                  ? picocolors.green(`✔ 已切换到会话: ${targetId}`)
-                  : picocolors.green(`✔ Switched to session: ${targetId}`),
-              );
-
-              this.saveLocalState({
-                lastSessionId: targetId,
-                lastModel: loop.getModelOverride() || config.models.default,
-              });
-            } else {
-              console.log(
-                isZh
-                  ? picocolors.red(`✖ 切换会话失败: ${targetId}`)
-                  : picocolors.red(`✖ Failed to resume session: ${targetId}`),
-              );
-            }
-            return { shouldExit: false, processed: true };
-          }
-
-          // Default Fork Logic
-          const forkName = parts.slice(1).join(" ").trim();
-          const newSessionId = generateId("sess");
-          const srcDir = join(sessionsDir, activeSessionId);
-          const destDir = join(sessionsDir, newSessionId);
-
-          if (!existsSync(srcDir)) {
-            console.log(
-              isZh
-                ? picocolors.red(`✖ 会话目录不存在: ${srcDir}`)
-                : picocolors.red(`✖ Session directory not found: ${srcDir}`),
-            );
-            return { shouldExit: false, processed: true };
-          }
-
-          mkdirSync(destDir, { recursive: true });
-
-          const files = readdirSync(srcDir);
-          for (const file of files) {
-            const srcFile = join(srcDir, file);
-            const destFile = join(destDir, file);
-            copyFileSync(srcFile, destFile);
-          }
-
-          const sessionJsonFile = join(destDir, "session.json");
-          if (existsSync(sessionJsonFile)) {
-            try {
-              const sessionData = JSON.parse(
-                readFileSync(sessionJsonFile, "utf8"),
-              );
-              sessionData.id = newSessionId;
-              sessionData.title = forkName || `Fork of ${activeSessionId}`;
-              sessionData.parentId = activeSessionId; // Save parent lineage
-              sessionData.createdAt = new Date().toISOString();
-              sessionData.updatedAt = new Date().toISOString();
-              writeFileSync(
-                sessionJsonFile,
-                JSON.stringify(sessionData, null, 2),
-                "utf8",
-              );
-            } catch (err: any) {
-              console.log(
-                isZh
-                  ? picocolors.yellow(
-                      `警告: 更新 session.json 失败: ${err.message}`,
-                    )
-                  : picocolors.yellow(
-                      `Warning: Failed to update session.json: ${err.message}`,
-                    ),
-              );
-            }
-          }
-
-          const success = loop.resumeSession(newSessionId);
-          if (success) {
-            tui.loadHistory(loop.getHistory());
-            console.log(
-              isZh
-                ? picocolors.green(
-                    `✔ 成功 Fork 并切换到新会话: ${newSessionId}`,
-                  )
-                : picocolors.green(
-                    `✔ Successfully forked and switched to new session: ${newSessionId}`,
-                  ),
-            );
-            this.saveLocalState({
-              lastSessionId: newSessionId,
-              lastModel: loop.getModelOverride() || config.models.default,
-            });
-          } else {
-            console.log(
-              isZh
-                ? picocolors.red(`✖ 切换到新会话 ${newSessionId} 失败。`)
-                : picocolors.red(
-                    `✖ Failed to resume new session ${newSessionId}.`,
-                  ),
-            );
-          }
-        } catch (err: any) {
-          console.log(
-            picocolors.red(`Error forking session: ${err.message}`),
-          );
-        } finally {
-          try {
-            tui.setCandidates(await getAutocompleteCandidates(cwd, config));
-          } catch {}
-          tui.syncFromLoop(loop);
-          if (wasActive) tui.start(config.budgetLimit);
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/mode" || command === "/ask" || command === "/code") {
-        const isZh = config.language === "zh";
-        let targetMode = "";
-        if (command === "/ask") {
-          targetMode = "strict";
-        } else if (command === "/code") {
-          targetMode = "normal";
-        } else {
-          targetMode = parts.slice(1).join(" ").trim().toLowerCase();
-        }
+        const targetMode = parts.slice(1).join(" ").trim().toLowerCase();
 
         if (!targetMode) {
           console.log(
@@ -3788,508 +1905,6 @@ export class CommandRouter {
                   "✖ Failed to copy to clipboard. Ensure pbcopy/clip/xclip is installed.",
                 ),
           );
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/copy-context") {
-        const isZh = config.language === "zh";
-        const files = loop.getRelevantFiles();
-        if (files.length === 0) {
-          console.log(
-            isZh
-              ? picocolors.yellow("当前活动上下文为空，无可复制的内容。")
-              : picocolors.yellow("No files in the active context to copy."),
-          );
-          return { shouldExit: false, processed: true };
-        }
-
-        const fileListStr = files.map((f) => f.path).join("\n");
-        const copied = this.copyToClipboard(fileListStr);
-        if (copied) {
-          console.log(
-            isZh
-              ? picocolors.green("✔ 已成功复制上下文文件列表到剪贴板！")
-              : picocolors.green(
-                  "✔ Successfully copied context file list to clipboard!",
-                ),
-          );
-        } else {
-          console.log(
-            isZh
-              ? picocolors.red("✖ 复制到剪贴板失败。")
-              : picocolors.red("✖ Failed to copy to clipboard."),
-          );
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/git") {
-        const wasActive = useFullscreenTui && tui.isActive;
-        if (wasActive) tui.stop();
-
-        const gitArgs = parts.slice(1).join(" ").trim();
-        const isZh = config.language === "zh";
-
-        if (!gitArgs) {
-          console.log(
-            isZh
-              ? picocolors.yellow("用法: /git <git_arguments>，如: /git diff")
-              : picocolors.yellow(
-                  "Usage: /git <git_arguments>, e.g.: /git diff",
-                ),
-          );
-          if (wasActive) tui.start(config.budgetLimit);
-          return { shouldExit: false, processed: true };
-        }
-
-        const shellCmd = `git ${gitArgs}`;
-        const permissionEngine = new PermissionEngine(config);
-        const decision = permissionEngine.evaluate(
-          "bash",
-          { command: shellCmd },
-          "execute",
-        );
-        if (decision.action === "deny") {
-          console.log(
-            picocolors.red(
-              isZh
-                ? `✖ Git 命令已被安全策略阻止: ${decision.reason}`
-                : `✖ Git command blocked by safety policy: ${decision.reason}`,
-            ),
-          );
-          if (wasActive) tui.start(config.budgetLimit);
-          return { shouldExit: false, processed: true };
-        }
-        if (decision.action === "ask") {
-          const approved = await Prompt.askApproval(
-            isZh
-              ? `Git 命令需要 ${decision.risk} 权限：${shellCmd}`
-              : `Git command requires ${decision.risk} permission: ${shellCmd}`,
-          );
-          if (!approved) {
-            console.log(
-              isZh ? "已取消 Git 命令。" : "Git command cancelled.",
-            );
-            if (wasActive) tui.start(config.budgetLimit);
-            return { shouldExit: false, processed: true };
-          }
-        }
-        console.log(
-          isZh
-            ? picocolors.cyan(`\n正在执行 Git 命令: ${shellCmd}...`)
-            : picocolors.cyan(`\nRunning Git command: ${shellCmd}...`),
-        );
-
-        try {
-          const { spawnSync } = await import("child_process");
-          const result = spawnSync(shellCmd, {
-            cwd,
-            stdio: "inherit",
-            shell: true,
-          });
-
-          if (result.status === 0) {
-            console.log(
-              isZh
-                ? picocolors.green(`\n✔ 命令执行成功。`)
-                : picocolors.green(`\n✔ Command completed successfully.`),
-            );
-          } else {
-            console.log(
-              isZh
-                ? picocolors.red(
-                    `\n✖ 命令执行失败，退出代码: ${result.status}`,
-                  )
-                : picocolors.red(
-                    `\n✖ Command failed with exit code ${result.status}`,
-                  ),
-            );
-          }
-          await Prompt.askText(
-            isZh
-              ? "按 Enter 键返回 Orbit..."
-              : "Press Enter to return to Orbit...",
-          );
-        } catch (err: any) {
-          console.log(
-            isZh
-              ? picocolors.red(`无法执行 Git 命令: ${err.message}`)
-              : picocolors.red(
-                  `Failed to execute Git command: ${err.message}`,
-                ),
-          );
-        } finally {
-          tui.syncFromLoop(loop);
-          if (wasActive) tui.start(config.budgetLimit);
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/btw") {
-        const isZh = config.language === "zh";
-        let question = parts.slice(1).join(" ").trim();
-        if (!question) {
-          const wasActive = useFullscreenTui && tui.isActive;
-          if (wasActive) tui.stop();
-          question =
-            (await Prompt.askText(
-              isZh
-                ? "输入你要咨询的快捷问题（不会记入当前会话历史）:"
-                : "Enter your quick side-question (won't be saved to session history):",
-            )) || "";
-          if (wasActive) tui.start(config.budgetLimit);
-        }
-
-        if (!question.trim()) {
-          return { shouldExit: false, processed: true };
-        }
-
-        console.log(isZh ? "\n正在查询回答..." : "\nQuerying answer...");
-        try {
-          const fastModel = config.models.fast || config.models.default;
-          const stream = this.providerInstance.chat({
-            model: fastModel,
-            messages: [
-              {
-                id: `msg_btw_${Date.now()}`,
-                role: "user",
-                createdAt: new Date().toISOString(),
-                content: [
-                  {
-                    type: "text",
-                    text: question,
-                  },
-                ],
-              },
-            ],
-            tools: [],
-          });
-
-          for await (const event of stream) {
-            if (event.type === "text_delta") {
-              process.stdout.write(event.text);
-            }
-          }
-          console.log("\n");
-          console.log(
-            picocolors.dim(
-              isZh
-                ? "💡 [提示：此快捷问答未记入会话历史，不消耗后续 Token]"
-                : "💡 [BTW: This side-question turn was not saved to session history to save tokens.]",
-            ),
-          );
-          console.log("");
-        } catch (err: any) {
-          console.log(picocolors.red(`✖ Failed: ${err.message}`));
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/memory") {
-        const isZh = config.language === "zh";
-
-        const candidatesPaths = [
-          join(cwd, "ORBIT.md"),
-          join(cwd, ".agents", "AGENTS.md"),
-          join(cwd, "AGENTS.md"),
-          join(cwd, "CLAUDE.md"),
-          join(cwd, "RUNE.md"),
-          join(cwd, ".cursorrules"),
-          join(cwd, ".copilotrules"),
-          join(cwd, "README.md"),
-        ];
-
-        let foundPath = "";
-        for (const p of candidatesPaths) {
-          if (existsSync(p)) {
-            foundPath = p;
-            break;
-          }
-        }
-
-        if (foundPath) {
-          console.log(
-            picocolors.cyan(
-              isZh
-                ? `\n=== 当前项目规则与记忆 (${foundPath}) ===\n`
-                : `\n=== Active Project Guidelines & Memory (${foundPath}) ===\n`,
-            ),
-          );
-          const content = readFileSync(foundPath, "utf8");
-          console.log(content);
-          console.log(
-            picocolors.cyan(
-              "========================================================\n",
-            ),
-          );
-        } else {
-          console.log(
-            picocolors.yellow(
-              isZh
-                ? "未找到本地项目规则文件（ORBIT.md, AGENTS.md, CLAUDE.md, RUNE.md, .cursorrules 或 .copilotrules）。"
-                : "No active project memory/rules file found (ORBIT.md, AGENTS.md, CLAUDE.md, RUNE.md, .cursorrules or .copilotrules).",
-            ),
-          );
-
-          const wasActive = useFullscreenTui && tui.isActive;
-          if (wasActive) tui.stop();
-          const create = await Prompt.askApproval(
-            isZh
-              ? "是否在当前项目根目录下自动创建 .agents/AGENTS.md 规则记忆文件？"
-              : "Create a standard .agents/AGENTS.md project memory file?",
-          );
-          if (wasActive) tui.start(config.budgetLimit);
-
-          if (create) {
-            const dir = join(cwd, ".agents");
-            if (!existsSync(dir)) {
-              mkdirSync(dir, { recursive: true });
-            }
-            const template = [
-              "# Project Guidelines & Memory",
-              "",
-              "## Technology Stack",
-              "- Node.js & TypeScript",
-              "",
-              "## Coding Standards",
-              "- Write clean, type-safe ES Modules",
-              "- Ensure all tests compile and pass",
-              "",
-            ].join("\n");
-            writeFileSync(join(dir, "AGENTS.md"), template, "utf8");
-            console.log(
-              picocolors.green(
-                isZh
-                  ? "✔ 成功创建 .agents/AGENTS.md。你可以随时修改以自定义 Agent 行为。"
-                  : "✔ Successfully created .agents/AGENTS.md. You can edit it to guide the agent.",
-              ),
-            );
-          }
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/tokens") {
-        const inputTokens = (loop as any).totalInputTokens || 0;
-        const outputTokens = (loop as any).totalOutputTokens || 0;
-        const cacheReadTokens = (loop as any).totalCacheReadTokens || 0;
-        const currentCost = loop.getSessionCost();
-        const budgetLimit = loop.getConfig().budgetLimit;
-
-        const tokensText = [
-          picocolors.bold(
-            picocolors.cyan("\n=== Orbit Session Token Usage & Cost ==="),
-          ),
-          `  📥 Input Tokens:       ${picocolors.green(inputTokens.toLocaleString())}`,
-          `  💾 Cache Read Tokens:  ${picocolors.green(cacheReadTokens.toLocaleString())}`,
-          `  📤 Output Tokens:      ${picocolors.green(outputTokens.toLocaleString())}`,
-          `  💰 Session Cost:       ${picocolors.green(`$${currentCost.toFixed(4)}`)} / $${budgetLimit.toFixed(2)} (Limit)`,
-          picocolors.cyan("========================================\n"),
-        ].join("\n");
-        this.printOutput(tokensText);
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/new" || command === "/reset") {
-        const wasActive = useFullscreenTui && tui.isActive;
-        try {
-          const activeModel =
-            loop.getModelOverride() || config.models.default;
-          const newSessionId = loop.startNewSession(
-            this.providerInstance.id,
-            activeModel,
-          );
-          tui.loadHistory([]);
-
-          if (wasActive && !tui.isActive) {
-            tui.start(config.budgetLimit);
-          }
-
-          this.printOutput(
-            picocolors.green(
-              config.language === "zh"
-                ? `✔ 成功创建并启动新会话: ${newSessionId}`
-                : `✔ Started new session: ${newSessionId}`,
-            ),
-          );
-
-          this.saveLocalState({
-            lastSessionId: newSessionId,
-            lastModel: activeModel,
-          });
-        } catch (err: any) {
-          if (wasActive && !tui.isActive) {
-            tui.start(config.budgetLimit);
-          }
-          this.printOutput(
-            picocolors.red(`Error starting new session: ${err.message}`),
-          );
-        } finally {
-          try {
-            tui.setCandidates(await getAutocompleteCandidates(cwd, config));
-          } catch {}
-          tui.syncFromLoop(loop);
-        }
-        return { shouldExit: false, processed: true };
-      }
-
-      if (command === "/delete" || command === "/rm" || command === "/del") {
-        const wasActive = useFullscreenTui && tui.isActive;
-        let stoppedTui = false;
-        const stopTuiIfNeeded = () => {
-          if (wasActive && !stoppedTui) {
-            tui.stop();
-            stoppedTui = true;
-          }
-        };
-        const restoreTuiAndPrint = (msg: string) => {
-          if (wasActive && stoppedTui && !tui.isActive) {
-            tui.start(config.budgetLimit);
-            stoppedTui = false;
-          }
-          this.printOutput(msg);
-        };
-
-        try {
-          const isZh = config.language === "zh";
-          const sessions = loop.getSessions();
-          let idToDelete = parts.slice(1).join(" ").trim();
-
-          if (!idToDelete) {
-            if (sessions.length === 0) {
-              restoreTuiAndPrint(
-                picocolors.yellow(
-                  isZh
-                    ? "没有找到任何保存的会话来删除。"
-                    : "No active or saved sessions found to delete.",
-                ),
-              );
-              return { shouldExit: false, processed: true };
-            }
-            const deleteOptions = sessions.map((s: any) => {
-              const formattedDate = new Date(s.createdAt).toLocaleString();
-              return {
-                value: s.id,
-                label: `${s.id} - ${s.title || "Untitled"} (${formattedDate}) [${s.model}]`,
-              };
-            });
-            deleteOptions.push({
-              value: "cancel",
-              label: "Cancel",
-            });
-            stopTuiIfNeeded();
-            idToDelete = await Prompt.askSelect(
-              isZh ? "选择要删除的会话：" : "Choose a session to delete:",
-              deleteOptions,
-            );
-          } else {
-            const idx = parseInt(idToDelete, 10);
-            if (!isNaN(idx) && idx >= 1 && idx <= sessions.length) {
-              idToDelete = sessions[idx - 1].id;
-            } else {
-              const found = sessions.find((s: any) => s.id === idToDelete);
-              if (!found) {
-                restoreTuiAndPrint(
-                  picocolors.red(
-                    isZh
-                      ? `✖ 未找到该会话: ${idToDelete}`
-                      : `✖ Session not found: ${idToDelete}`,
-                  ),
-                );
-                return { shouldExit: false, processed: true };
-              }
-            }
-          }
-
-          if (!idToDelete || idToDelete === "cancel") {
-            return { shouldExit: false, processed: true };
-          }
-
-          // Only ask for confirmation if no argument was passed (interactive mode)
-          let confirm = "yes";
-          const hasArg = !!parts.slice(1).join(" ").trim();
-          if (!hasArg) {
-            stopTuiIfNeeded();
-            confirm = await Prompt.askSelect(
-              isZh
-                ? `您确定要删除会话 ${idToDelete} 吗？`
-                : `Are you sure you want to delete session ${idToDelete}?`,
-              [
-                {
-                  value: "yes",
-                  label: isZh ? "是，删除它" : "Yes, delete it",
-                },
-                { value: "no", label: isZh ? "否，取消" : "No, cancel" },
-              ],
-            );
-          }
-
-          if (confirm === "yes") {
-            loop.deleteSession(idToDelete);
-
-            const activeSession =
-              (loop as any).state?.sessionId ||
-              (loop as any).sessionManager.getActiveSession()?.id;
-            let switchMsg = "";
-            if (activeSession === idToDelete) {
-              const remaining = loop.getSessions();
-              if (remaining.length > 0) {
-                const targetSession = remaining[0];
-                const success = loop.resumeSession(targetSession.id);
-                if (success) {
-                  tui.loadHistory(loop.getHistory());
-                  switchMsg = isZh
-                    ? `✔ 已自动切换到会话: ${targetSession.id}`
-                    : `✔ Automatically switched to session: ${targetSession.id}`;
-                  this.saveLocalState({
-                    lastSessionId: targetSession.id,
-                    lastModel:
-                      loop.getModelOverride() || config.models.default,
-                  });
-                }
-              } else {
-                const activeModel =
-                  loop.getModelOverride() || config.models.default;
-                const newSessionId = loop.startNewSession(
-                  this.providerInstance.id,
-                  activeModel,
-                );
-                tui.loadHistory([]);
-                switchMsg = isZh
-                  ? `✔ 已自动启动新会话: ${newSessionId}`
-                  : `✔ Automatically started new session: ${newSessionId}`;
-                this.saveLocalState({
-                  lastSessionId: newSessionId,
-                  lastModel: activeModel,
-                });
-              }
-            }
-
-            // Restore TUI and print success
-            restoreTuiAndPrint(
-              picocolors.green(
-                isZh
-                  ? `✔ 会话 ${idToDelete} 已成功删除。`
-                  : `✔ Session ${idToDelete} deleted successfully.`,
-              ),
-            );
-            if (switchMsg) {
-              restoreTuiAndPrint(picocolors.green(switchMsg));
-            }
-          }
-        } catch (err: any) {
-          restoreTuiAndPrint(
-            picocolors.red(`Error deleting session: ${err.message}`),
-          );
-        } finally {
-          if (wasActive && stoppedTui && !tui.isActive) {
-            tui.start(config.budgetLimit);
-          }
-          try {
-            tui.setCandidates(await getAutocompleteCandidates(cwd, config));
-          } catch {}
-          tui.syncFromLoop(loop);
         }
         return { shouldExit: false, processed: true };
       }

@@ -1,5 +1,5 @@
-import { ConfigLoader } from "@orbit-ai/config";
-import { AutocompleteEngine } from "@orbit-ai/core";
+import { ConfigLoader } from "@orbit-build/config";
+import { AutocompleteEngine } from "@orbit-build/core";
 
 class JSONRPCReader {
   private buffer = "";

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { AgentLoop } from "./AgentLoop.js";
-import { OrbitConfig } from "@orbit-ai/config";
-import { ModelProvider } from "@orbit-ai/model-providers";
+import { OrbitConfig } from "@orbit-build/config";
+import { ModelProvider } from "@orbit-build/model-providers";
 import fs from "fs";
 import path from "path";
 
@@ -12,8 +12,8 @@ describe("AgentLoop Fin Heuristic Routing", () => {
     name: "test",
     provider: { default: "openai" },
     models: {
-      default: "deepseek-reasoner",
-      fast: "deepseek-chat",
+      default: "deepseek-v4-pro",
+      fast: "deepseek-v4-flash",
     },
     providers: { openai: { type: "openai", apiKey: "test" } },
     permissions: {
@@ -86,7 +86,7 @@ describe("AgentLoop Fin Heuristic Routing", () => {
 
     expect(chatMock).toHaveBeenCalled();
     const callArgs = chatMock.mock.calls[0][0];
-    expect(callArgs.model).toBe("deepseek-reasoner");
+    expect(callArgs.model).toBe("deepseek-v4-pro");
     expect(callArgs.thinking).toEqual({ enabled: true, budgetTokens: 4096 });
   });
 
@@ -116,8 +116,8 @@ describe("AgentLoop Fin Heuristic Routing", () => {
 
     expect(chatMock).toHaveBeenCalled();
     const callArgs = chatMock.mock.calls[0][0];
-    expect(callArgs.model).toBe("deepseek-chat");
-    // Since it's deepseek-chat (which has "chat" in name and doesn't contain "reasoner" or "r1"), thinking should be undefined
+    expect(callArgs.model).toBe("deepseek-v4-flash");
+    // Since it's deepseek-v4-flash (which doesn't contain "reasoner" or "r1" or "v4-pro"), thinking should be undefined
     expect(callArgs.thinking).toBeUndefined();
   });
 });

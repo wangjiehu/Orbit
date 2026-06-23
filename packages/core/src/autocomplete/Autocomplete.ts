@@ -2,7 +2,7 @@ import {
   OpenAIProvider,
   DeepSeekOpenAIProvider,
   OllamaProvider,
-} from "@orbit-ai/model-providers";
+} from "@orbit-build/model-providers";
 
 function getAutocompleteProvider(providerId: string, config: any) {
   const providerConfig = config.providers?.[providerId];

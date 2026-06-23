@@ -1,16 +1,29 @@
 {
-  "name": "@orbit-ai/tui",
+  "name": "@orbit-build/tui",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts"
+    "build": "tsup src/index.ts --format esm --dts --clean"
   },
   "dependencies": {
-    "@orbit-ai/shared": "workspace:*",
-    "@orbit-ai/config": "workspace:*",
+    "@orbit-build/shared": "workspace:*",
+    "@orbit-build/config": "workspace:*",
     "@clack/prompts": "^0.7.0",
     "picocolors": "^1.0.1"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

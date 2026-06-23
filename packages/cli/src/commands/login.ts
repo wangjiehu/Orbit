@@ -1,6 +1,6 @@
 import readline from "readline";
 import picocolors from "picocolors";
-import { CredentialsManager } from "@orbit-ai/config";
+import { CredentialsManager } from "@orbit-build/config";
 
 interface ProviderChoice {
   name: string;

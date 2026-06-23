@@ -1,4 +1,4 @@
-import { ConfigLoader } from "@orbit-ai/config";
+import { ConfigLoader } from "@orbit-build/config";
 import picocolors from "picocolors";
 
 export function runConfig(cwd: string): void {

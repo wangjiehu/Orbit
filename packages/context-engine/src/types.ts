@@ -1,4 +1,4 @@
-import { ProjectIndex } from "@orbit-ai/tools";
+import { ProjectIndex } from "@orbit-build/tools";
 
 export interface ContextPack {
   projectInstructions: string;

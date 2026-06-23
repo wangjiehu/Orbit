@@ -1,5 +1,5 @@
-import { ConfigLoader } from '@orbit-ai/config';
-import { AgentLoop } from '@orbit-ai/core';
+import { ConfigLoader } from '@orbit-build/config';
+import { AgentLoop } from '@orbit-build/core';
 import { join } from 'path';
 
 class MockProvider {

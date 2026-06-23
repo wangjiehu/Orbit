@@ -27,14 +27,14 @@
 
 Orbit is organized as a clean, modular pnpm monorepo:
 
-- [`@orbit-ai/cli`](file:///c:/Users/24377/Desktop/Orbit/packages/cli): Main CLI commander entry point and LSP server bridge.
-- [`@orbit-ai/core`](file:///c:/Users/24377/Desktop/Orbit/packages/core): Core agent loop, prompt caching, state managers, and autocomplete debouncer.
-- [`@orbit-ai/context-engine`](file:///c:/Users/24377/Desktop/Orbit/packages/context-engine): AST Symbol Indexer, PageRank Repo Map generator, and hybrid BM25/Vector RAG.
-- [`@orbit-ai/model-providers`](file:///c:/Users/24377/Desktop/Orbit/packages/model-providers): Providers for DeepSeek, OpenAI, Anthropic, and local Ollama streams.
-- [`@orbit-ai/sandbox`](file:///c:/Users/24377/Desktop/Orbit/packages/sandbox): Git checkpoint managers and command execution rollback controllers.
-- [`@orbit-ai/tools`](file:///c:/Users/24377/Desktop/Orbit/packages/tools): File system operations, grep scanner, reference searchers, and shell execution sandboxes.
-- [`@orbit-ai/tui`](file:///c:/Users/24377/Desktop/Orbit/packages/tui): Terminal UI interactive prompt controls and colored terminal renderers.
-- [`@orbit-ai/shared`](file:///c:/Users/24377/Desktop/Orbit/packages/shared): Common path utilities, token metrics, and shared schemas.
+- [`@orbit-build/cli`](file:///c:/Users/24377/Desktop/Orbit/packages/cli): Main CLI commander entry point and LSP server bridge.
+- [`@orbit-build/core`](file:///c:/Users/24377/Desktop/Orbit/packages/core): Core agent loop, prompt caching, state managers, and autocomplete debouncer.
+- [`@orbit-build/context-engine`](file:///c:/Users/24377/Desktop/Orbit/packages/context-engine): AST Symbol Indexer, PageRank Repo Map generator, and hybrid BM25/Vector RAG.
+- [`@orbit-build/model-providers`](file:///c:/Users/24377/Desktop/Orbit/packages/model-providers): Providers for DeepSeek, OpenAI, Anthropic, and local Ollama streams.
+- [`@orbit-build/sandbox`](file:///c:/Users/24377/Desktop/Orbit/packages/sandbox): Git checkpoint managers and command execution rollback controllers.
+- [`@orbit-build/tools`](file:///c:/Users/24377/Desktop/Orbit/packages/tools): File system operations, grep scanner, reference searchers, and shell execution sandboxes.
+- [`@orbit-build/tui`](file:///c:/Users/24377/Desktop/Orbit/packages/tui): Terminal UI interactive prompt controls and colored terminal renderers.
+- [`@orbit-build/shared`](file:///c:/Users/24377/Desktop/Orbit/packages/shared): Common path utilities, token metrics, and shared schemas.
 
 ---
 

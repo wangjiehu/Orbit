@@ -1,6 +1,6 @@
 import { existsSync, promises as fsPromises } from "fs";
 import { join, dirname } from "path";
-import { getGitBranch } from "@orbit-ai/shared";
+import { getGitBranch } from "@orbit-build/shared";
 
 export interface Document {
   id: string;

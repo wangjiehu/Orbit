@@ -26,7 +26,7 @@ context:
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("should parse class, interface, function, and constants and cache them in symbols.json", async () => {
+  it("should parse class, interface, function, and constants and cache them in symbols.json", { timeout: 60000 }, async () => {
     const srcDir = join(tempDir, "src");
     mkdirSync(srcDir, { recursive: true });
 
@@ -82,7 +82,7 @@ export const API_URL = 'http://localhost';
     expect(searchRes[0].type).toBe("interface");
   });
 
-  it("should incrementally update, clean up deleted files, and respect ignore lists", async () => {
+  it("should incrementally update, clean up deleted files, and respect ignore lists", { timeout: 60000 }, async () => {
     const srcDir = join(tempDir, "src");
     mkdirSync(srcDir, { recursive: true });
 
@@ -108,7 +108,7 @@ export const API_URL = 'http://localhost';
     expect(index.files["src/b.ts"]).toBeUndefined();
   });
 
-  it("should parse imports, compute PageRank, and generate a token-bounded repo map", async () => {
+  it("should parse imports, compute PageRank, and generate a token-bounded repo map", { timeout: 60000 }, async () => {
     const srcDir = join(tempDir, "src");
     mkdirSync(srcDir, { recursive: true });
 

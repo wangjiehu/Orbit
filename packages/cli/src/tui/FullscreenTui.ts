@@ -1,11 +1,10 @@
 import { join, dirname } from "path";
 import { homedir } from "os";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
-import { execSync } from "child_process";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "fs";
+import { exec } from "child_process";
 import readline from "readline";
-import picocolors from "picocolors";
-import { eventBus } from "@orbit-ai/core";
-import { Prompt, DiffView, Renderer } from "@orbit-ai/tui";
+import { Prompt, Renderer } from "@orbit-build/tui";
+import { BUILTIN_SLASH_COMMANDS } from "../runtime/CommandRouter.js";
 
 export function previousCodePointIndex(text: string, index: number): number {
   const safeIndex = Math.max(0, Math.min(index, text.length));
@@ -33,7 +32,32 @@ export function nextCodePointIndex(text: string, index: number): number {
   return safeIndex + 1;
 }
 
-export function parseMouseWheelDirection(input: string): "up" | "down" | null {
+export function previousWordIndex(text: string, index: number): number {
+  let pos = index;
+  while (pos > 0 && /\s/.test(text.charAt(pos - 1))) {
+    pos--;
+  }
+  while (pos > 0 && !/\s/.test(text.charAt(pos - 1))) {
+    pos--;
+  }
+  return pos;
+}
+
+export function nextWordIndex(text: string, index: number): number {
+  let pos = index;
+  while (pos < text.length && /\s/.test(text.charAt(pos))) {
+    pos++;
+  }
+  while (pos < text.length && !/\s/.test(text.charAt(pos))) {
+    pos++;
+  }
+  return pos;
+}
+
+export function parseMouseWheelDirection(
+  input: string | undefined | null,
+): "up" | "down" | null {
+  if (typeof input !== "string") return null;
   const match = input.match(/\x1b\[<(\d+);\d+;\d+[mM]/);
   if (!match) return null;
   const button = Number(match[1]);
@@ -108,14 +132,46 @@ export async function pageText(text: string): Promise<void> {
   }
 }
 
+// ─── Shared ANSI colour helpers (class-level constant, avoids recreation per render) ───
+const MORANDI = {
+  user:      (s: string) => `\x1b[38;2;142;163;175m${s}\x1b[0m`,
+  userBold:  (s: string) => `\x1b[1;38;2;142;163;175m${s}\x1b[0m`,
+  asst:      (s: string) => `\x1b[38;2;143;153;129m${s}\x1b[0m`,
+  asstBold:  (s: string) => `\x1b[1;38;2;143;153;129m${s}\x1b[0m`,
+  cyan:      (s: string) => `\x1b[38;2;142;163;175m${s}\x1b[0m`,
+  accent:    (s: string) => `\x1b[38;2;200;170;120m${s}\x1b[0m`,
+  completed: (s: string) => `\x1b[38;2;135;165;130m${s}\x1b[0m`,
+  failed:    (s: string) => `\x1b[38;2;180;120;120m${s}\x1b[0m`,
+  warn:      (s: string) => `\x1b[38;2;180;140;130m${s}\x1b[0m`,
+  white:     (s: string) => `\x1b[38;2;230;225;215m${s}\x1b[0m`,
+  whiteBold: (s: string) => `\x1b[1;38;2;230;225;215m${s}\x1b[0m`,
+  gray:      (s: string) => `\x1b[38;2;150;150;150m${s}\x1b[0m`,
+  dim:       (s: string) => `\x1b[2;38;2;110;110;110m${s}\x1b[0m`,
+} as const;
+
+// Width of the fixed input-box left prefix "  │ orbit > " (constant, pre-calculated)
+const INPUT_PREFIX_WIDTH = 12; // "  │ orbit > " visual width
+
+/** One conversation turn in the TUI history view. */
+type HistoryEntry = {
+  role: "user" | "assistant" | "system";
+  text: string;
+  thoughtTime?: number;
+  totalTime?: number;
+  attempt?: number;
+  model?: string;
+};
+
+interface TuiTurn {
+  user: HistoryEntry;
+  assistant?: HistoryEntry;
+  system: HistoryEntry[];
+}
+
+
 export class FullscreenTui {
-  private history: Array<{
-    role: "user" | "assistant" | "system";
-    text: string;
-    thoughtTime?: number; // ms
-    totalTime?: number; // ms
-    attempt?: number;
-  }> = [];
+  private history: HistoryEntry[] = [];
+
 
   private inputBuffer = "";
   private cursorPosition = 0;
@@ -144,6 +200,9 @@ export class FullscreenTui {
   private isThinking = false;
 
   private sessionCost = 0;
+  private lastNpmCheckTime = 0;
+  private isCheckingNpm = false;
+  private npmNeedsUpdate = false;
   private totalInputTokens = 0;
   private totalCacheReadTokens = 0;
   private totalOutputTokens = 0;
@@ -162,6 +221,8 @@ export class FullscreenTui {
 
   private originalWrite = process.stdout.write.bind(process.stdout);
   private hasWrittenStdoutSinceStop = false;
+  private originalStdinEmit: any = null;
+
 
   private candidates: {
     commands: string[];
@@ -172,6 +233,8 @@ export class FullscreenTui {
   private modelNameGetter: () => string = () => this.modelName;
   private permissionsMode = "normal";
   private hideAutocomplete = false;
+  /** Cached logo-line widths — static strings, computed once. */
+  private _cachedLogoWidths: { w0: number; w1: number; w2: number; w3: number; maxW: number } | null = null;
 
   private cachedPlanLines: string[] = [];
   private lastPlanReadTime = 0;
@@ -187,6 +250,7 @@ export class FullscreenTui {
     deleted: number;
   } | null = null;
   private lastGitSummaryReadTime = 0;
+  private isRefreshingGit = false;
   private historyScrollOffset = 0;
   private maxHistoryScrollOffset = 0;
   private lastHistoryLineCount = 0;
@@ -219,10 +283,7 @@ export class FullscreenTui {
         if (
           trimmed.startsWith("- [ ") ||
           trimmed.startsWith("- [x") ||
-          trimmed.startsWith("- [/") ||
-          trimmed.startsWith("- [x]") ||
-          trimmed.startsWith("- [ ]") ||
-          trimmed.startsWith("- [/]")
+          trimmed.startsWith("- [/")
         ) {
           planItems.push(trimmed);
         }
@@ -266,7 +327,24 @@ export class FullscreenTui {
   }
 
   public setCandidates(candidates: any) {
-    this.candidates = candidates;
+    if (!candidates) {
+      this.candidates = null;
+      return;
+    }
+    this.candidates = {
+      commands: Array.isArray(candidates.commands)
+        ? candidates.commands.filter((c: any) => typeof c === "string")
+        : [],
+      files: Array.isArray(candidates.files)
+        ? candidates.files.filter((f: any) => typeof f === "string")
+        : [],
+      symbols: Array.isArray(candidates.symbols)
+        ? candidates.symbols.filter((s: any) => typeof s === "string")
+        : [],
+      sessions: Array.isArray(candidates.sessions)
+        ? candidates.sessions.filter((s: any) => typeof s === "string")
+        : [],
+    };
   }
 
   private getHistoryFilePath(): string {
@@ -305,7 +383,7 @@ export class FullscreenTui {
     }
   }
 
-  public addSystemMessage(text: string, raw = false) {
+  public addSystemMessage(text: string, _raw = false) {
     if (!text) return;
     this.history.push({
       role: "system",
@@ -324,10 +402,59 @@ export class FullscreenTui {
     this.budgetLimit = budgetLimit;
     this.isActive = true;
     this.hasWrittenStdoutSinceStop = false;
+
+    if (this.originalStdinEmit) {
+      process.stdin.emit = this.originalStdinEmit;
+      this.originalStdinEmit = null;
+    }
+
     const mouseMode =
       this.config?.tui?.mouse !== false ? "\x1b[?1000h\x1b[?1006h" : "";
     process.stdout.write(`\x1b[?1049h${mouseMode}\x1b[?25l`);
     process.stdout.on("resize", this.onResize);
+
+    if (this.config?.tui?.mouse !== false) {
+      this.originalStdinEmit = process.stdin.emit;
+      process.stdin.emit = (event: string, ...args: any[]) => {
+        if (event === "data" && args[0]) {
+          const chunk = args[0];
+          const isBuffer = Buffer.isBuffer(chunk);
+          let str = isBuffer ? chunk.toString("utf8") : chunk;
+
+          const sgrRegex = /\x1b\[<(\d+);(\d+);(\d+)([mM])/g;
+          let match;
+          let hasMouse = false;
+          while ((match = sgrRegex.exec(str)) !== null) {
+            hasMouse = true;
+            const button = Number(match[1]);
+            if ((button & 64) !== 0) {
+              const direction = (button & 1) === 0 ? "up" : "down";
+              const lines = this.getWheelScrollLines();
+              this.scrollHistory(direction === "up" ? lines : -lines);
+            }
+          }
+
+          if (hasMouse) {
+            str = str.replace(sgrRegex, "");
+          }
+
+          const normalRegex = /\x1b\[M([\s\S]{3})/g;
+          if (normalRegex.test(str)) {
+            str = str.replace(normalRegex, "");
+            hasMouse = true;
+          }
+
+          if (hasMouse) {
+            if (str.length === 0) {
+              return true;
+            }
+            args[0] = isBuffer ? Buffer.from(str, "utf8") : str;
+          }
+        }
+        return this.originalStdinEmit.apply(process.stdin, [event, ...args]);
+      };
+    }
+
     this.render();
   }
 
@@ -342,7 +469,13 @@ export class FullscreenTui {
       this.renderTimeout = null;
     }
     this.renderPending = false;
+
+    if (this.originalStdinEmit) {
+      process.stdin.emit = this.originalStdinEmit;
+      this.originalStdinEmit = null;
+    }
   }
+
 
   public dispose() {
     this.stopThinkingInput();
@@ -361,29 +494,112 @@ export class FullscreenTui {
     process.stdout.write = this.originalWrite as typeof process.stdout.write;
   }
 
+  private getNpmNeedsUpdate(): boolean {
+    const now = Date.now();
+    if (now - this.lastNpmCheckTime > 8000) {
+      this.refreshNpmStatusAsync().catch(() => {});
+    }
+    return this.npmNeedsUpdate;
+  }
+
+  private async refreshNpmStatusAsync() {
+    if (this.isCheckingNpm) return;
+    this.isCheckingNpm = true;
+    this.lastNpmCheckTime = Date.now();
+
+    try {
+      const packageJsonPath = join(this.cwd, "package.json");
+      if (!existsSync(packageJsonPath)) {
+        this.npmNeedsUpdate = false;
+        this.isCheckingNpm = false;
+        return;
+      }
+
+      const nodeModulesPath = join(this.cwd, "node_modules");
+      if (!existsSync(nodeModulesPath)) {
+        this.npmNeedsUpdate = true;
+        this.isCheckingNpm = false;
+        this.draw();
+        return;
+      }
+
+      const packageJsonStat = statSync(packageJsonPath);
+      let maxConfigMtime = packageJsonStat.mtimeMs;
+
+      const lockfiles = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"];
+      for (const lf of lockfiles) {
+        const lfPath = join(this.cwd, lf);
+        if (existsSync(lfPath)) {
+          const stat = statSync(lfPath);
+          if (stat.mtimeMs > maxConfigMtime) {
+            maxConfigMtime = stat.mtimeMs;
+          }
+        }
+      }
+
+      const nodeModulesStat = statSync(nodeModulesPath);
+      this.npmNeedsUpdate = maxConfigMtime > nodeModulesStat.mtimeMs;
+    } catch {
+      this.npmNeedsUpdate = false;
+    } finally {
+      this.isCheckingNpm = false;
+      this.draw();
+    }
+  }
+
   private getGitSummary() {
     const now = Date.now();
-    if (this.cachedGitSummary && now - this.lastGitSummaryReadTime < 1500) {
-      return this.cachedGitSummary;
+    if (!this.cachedGitSummary) {
+      this.cachedGitSummary = {
+        branch: "no-git",
+        added: 0,
+        modified: 0,
+        deleted: 0,
+      };
+      this.refreshGitSummaryAsync().catch(() => {});
+    } else if (now - this.lastGitSummaryReadTime > 8000) {
+      this.refreshGitSummaryAsync().catch(() => {});
     }
+    return this.cachedGitSummary;
+  }
 
-    const summary = {
-      branch: "no-git",
-      added: 0,
-      modified: 0,
-      deleted: 0,
-    };
+  private async refreshGitSummaryAsync() {
+    if (this.isRefreshingGit) return;
+    this.isRefreshingGit = true;
+    this.lastGitSummaryReadTime = Date.now();
+
     try {
-      summary.branch = execSync("git rev-parse --abbrev-ref HEAD", {
-        cwd: this.cwd,
-        stdio: ["ignore", "pipe", "ignore"],
-      })
-        .toString()
-        .trim();
-      const statusOutput = execSync("git status --porcelain", {
-        cwd: this.cwd,
-        stdio: ["ignore", "pipe", "ignore"],
-      }).toString();
+      const summary = {
+        branch: "no-git",
+        added: 0,
+        modified: 0,
+        deleted: 0,
+      };
+
+      const branchPromise = new Promise<string>((resolve) => {
+        exec(
+          "git rev-parse --abbrev-ref HEAD",
+          { cwd: this.cwd },
+          (err, stdout) => {
+            if (err) resolve("no-git");
+            else resolve(stdout.trim());
+          },
+        );
+      });
+
+      const statusPromise = new Promise<string>((resolve) => {
+        exec("git status --porcelain", { cwd: this.cwd }, (err, stdout) => {
+          if (err) resolve("");
+          else resolve(stdout);
+        });
+      });
+
+      const [branch, statusOutput] = await Promise.all([
+        branchPromise,
+        statusPromise,
+      ]);
+      summary.branch = branch;
+
       for (const line of statusOutput.split("\n")) {
         if (!line) continue;
         const code = line.substring(0, 2);
@@ -395,12 +611,14 @@ export class FullscreenTui {
           summary.deleted++;
         }
       }
+
+      this.cachedGitSummary = summary;
+      this.render();
     } catch {
-      // Non-git workspaces are valid.
+      // Ignored
+    } finally {
+      this.isRefreshingGit = false;
     }
-    this.cachedGitSummary = summary;
-    this.lastGitSummaryReadTime = now;
-    return summary;
   }
 
   private getWheelScrollLines(): number {
@@ -459,104 +677,175 @@ export class FullscreenTui {
     process.stdin.resume();
 
     this.thinkingKeypressListener = (str: string, key: any) => {
-      if (!this.isActive) {
-        this.stopThinkingInput();
-        return;
-      }
+      try {
+        if (!this.isActive) {
+          this.stopThinkingInput();
+          return;
+        }
 
-      if (this.handleScrollInput(str, key)) {
-        return;
-      }
+        if (this.handleScrollInput(str, key)) {
+          return;
+        }
 
-      if (key && key.ctrl && key.name === "c") {
-        if (this.inputBuffer.length > 0) {
+        if (key && (key.name === "escape" || (key.ctrl && key.name === "c"))) {
+          if (this.inputBuffer.length > 0) {
+            this.inputBuffer = "";
+            this.cursorPosition = 0;
+            this.render();
+          } else {
+            if (this.activeRunnable) {
+              this.activeRunnable.abort();
+            }
+          }
+          return;
+        }
+
+        if (key && (key.name === "return" || key.name === "enter")) {
+          const submitted = this.inputBuffer;
+          if (submitted.trim()) {
+            this.pendingGuidedStatement = submitted;
+            if (this.activeRunnable) {
+              this.activeRunnable.abort();
+            }
+          }
           this.inputBuffer = "";
           this.cursorPosition = 0;
           this.render();
-        } else {
-          if (this.activeRunnable) {
-            this.activeRunnable.abort();
-          }
+          return;
         }
-        return;
-      }
 
-      if (key && (key.name === "return" || key.name === "enter")) {
-        const submitted = this.inputBuffer;
-        if (submitted.trim()) {
-          this.pendingGuidedStatement = submitted;
-          if (this.activeRunnable) {
-            this.activeRunnable.abort();
-          }
-        }
-        this.inputBuffer = "";
-        this.cursorPosition = 0;
-        this.render();
-        return;
-      }
-
-      if (key && key.ctrl) {
-        return;
-      }
-
-      if (key && key.name === "backspace") {
-        if (this.cursorPosition > 0) {
-          const previousIndex = previousCodePointIndex(
-            this.inputBuffer,
-            this.cursorPosition,
-          );
-          this.inputBuffer =
-            this.inputBuffer.slice(0, previousIndex) +
-            this.inputBuffer.slice(this.cursorPosition);
-          this.cursorPosition = previousIndex;
+        if (key && (key.name === "home" || (key.ctrl && key.name === "a"))) {
+          this.cursorPosition = 0;
           this.render();
+          return;
         }
-        return;
-      }
 
-      if (key && key.name === "delete") {
-        if (this.cursorPosition < this.inputBuffer.length) {
-          const nextIndex = nextCodePointIndex(
-            this.inputBuffer,
-            this.cursorPosition,
-          );
+        if (key && (key.name === "end" || (key.ctrl && key.name === "e"))) {
+          this.cursorPosition = this.inputBuffer.length;
+          this.render();
+          return;
+        }
+
+        if (key && (key.ctrl || key.meta) && key.name === "left") {
+          this.cursorPosition = previousWordIndex(this.inputBuffer, this.cursorPosition);
+          this.render();
+          return;
+        }
+
+        if (key && (key.ctrl || key.meta) && key.name === "right") {
+          this.cursorPosition = nextWordIndex(this.inputBuffer, this.cursorPosition);
+          this.render();
+          return;
+        }
+
+        if (key && key.ctrl && (key.name === "backspace" || key.name === "w")) {
+          if (this.cursorPosition > 0) {
+            const targetPos = previousWordIndex(this.inputBuffer, this.cursorPosition);
+            this.inputBuffer =
+              this.inputBuffer.slice(0, targetPos) +
+              this.inputBuffer.slice(this.cursorPosition);
+            this.cursorPosition = targetPos;
+            this.render();
+          }
+          return;
+        }
+
+        if (key && key.ctrl && key.name === "delete") {
+          if (this.cursorPosition < this.inputBuffer.length) {
+            const targetPos = nextWordIndex(this.inputBuffer, this.cursorPosition);
+            this.inputBuffer =
+              this.inputBuffer.slice(0, this.cursorPosition) +
+              this.inputBuffer.slice(targetPos);
+            this.render();
+          }
+          return;
+        }
+
+        if (key && key.ctrl && key.name === "u") {
+          this.inputBuffer = "";
+          this.cursorPosition = 0;
+          this.render();
+          return;
+        }
+
+        if (key && key.ctrl) {
+          return;
+        }
+
+        if (key && key.name === "backspace") {
+          if (this.cursorPosition > 0) {
+            const previousIndex = previousCodePointIndex(
+              this.inputBuffer,
+              this.cursorPosition,
+            );
+            this.inputBuffer =
+              this.inputBuffer.slice(0, previousIndex) +
+              this.inputBuffer.slice(this.cursorPosition);
+            this.cursorPosition = previousIndex;
+            this.render();
+          }
+          return;
+        }
+
+        if (key && key.name === "delete") {
+          if (this.cursorPosition < this.inputBuffer.length) {
+            const nextIndex = nextCodePointIndex(
+              this.inputBuffer,
+              this.cursorPosition,
+            );
+            this.inputBuffer =
+              this.inputBuffer.slice(0, this.cursorPosition) +
+              this.inputBuffer.slice(nextIndex);
+            this.render();
+          }
+          return;
+        }
+
+        if (key && key.name === "left") {
+          if (this.cursorPosition > 0) {
+            this.cursorPosition = previousCodePointIndex(
+              this.inputBuffer,
+              this.cursorPosition,
+            );
+            this.render();
+          }
+          return;
+        }
+
+        if (key && key.name === "right") {
+          if (this.cursorPosition < this.inputBuffer.length) {
+            this.cursorPosition = nextCodePointIndex(
+              this.inputBuffer,
+              this.cursorPosition,
+            );
+            this.render();
+          }
+          return;
+        }
+
+        if (str && !/[\u0000-\u001f\u007f]/.test(str)) {
           this.inputBuffer =
             this.inputBuffer.slice(0, this.cursorPosition) +
-            this.inputBuffer.slice(nextIndex);
+            str +
+            this.inputBuffer.slice(this.cursorPosition);
+          this.cursorPosition += str.length;
           this.render();
         }
-        return;
-      }
-
-      if (key && key.name === "left") {
-        if (this.cursorPosition > 0) {
-          this.cursorPosition = previousCodePointIndex(
-            this.inputBuffer,
-            this.cursorPosition,
+      } catch (error) {
+        const logDir = join(homedir(), ".orbit");
+        try {
+          if (!existsSync(logDir)) {
+            mkdirSync(logDir, { recursive: true });
+          }
+          writeFileSync(
+            join(logDir, "tui_error.log"),
+            `[${new Date().toISOString()}] Error in thinkingKeypressListener: ${error instanceof Error ? error.stack : error}\n`,
+            { flag: "a" },
           );
+        } catch {}
+        try {
           this.render();
-        }
-        return;
-      }
-
-      if (key && key.name === "right") {
-        if (this.cursorPosition < this.inputBuffer.length) {
-          this.cursorPosition = nextCodePointIndex(
-            this.inputBuffer,
-            this.cursorPosition,
-          );
-          this.render();
-        }
-        return;
-      }
-
-      if (str && !/[\u0000-\u001f\u007f]/.test(str)) {
-        this.inputBuffer =
-          this.inputBuffer.slice(0, this.cursorPosition) +
-          str +
-          this.inputBuffer.slice(this.cursorPosition);
-        this.cursorPosition += str.length;
-        this.render();
+        } catch {}
       }
     };
 
@@ -578,10 +867,24 @@ export class FullscreenTui {
     const parts = line.split(/\s+/);
 
     if (parts[0] === "/add" && line.includes(" ")) {
-      const query = line.slice(5).trim();
+      let query = line.slice(5).trim();
+      let prefix = "/add ";
+      if (query.startsWith("-r ")) {
+        prefix = "/add -r ";
+        query = query.slice(3).trim();
+      } else if (query.startsWith("--read-only ")) {
+        prefix = "/add --read-only ";
+        query = query.slice(12).trim();
+      } else if (query.startsWith("--readonly ")) {
+        prefix = "/add --readonly ";
+        query = query.slice(11).trim();
+      } else if (query === "-r" || query === "--read-only" || query === "--readonly") {
+        query = "";
+        prefix = `/add ${parts[1]} `;
+      }
       const hits = (this.candidates.files || [])
         .filter((f) => f.toLowerCase().includes(query.toLowerCase()))
-        .map((f) => `/add ${f}`);
+        .map((f) => `${prefix}${f}`);
       if (hits.length > 0) return hits;
     }
 
@@ -590,26 +893,6 @@ export class FullscreenTui {
       const hits = (this.candidates.files || [])
         .filter((f) => f.toLowerCase().includes(query.toLowerCase()))
         .map((f) => `/drop ${f}`);
-      if (hits.length > 0) return hits;
-    }
-
-    if (
-      (parts[0] === "/read-only" || parts[0] === "/readonly") &&
-      line.includes(" ")
-    ) {
-      const prefix = parts[0];
-      const query = line.slice(prefix.length + 1).trim();
-      const hits = (this.candidates.files || [])
-        .filter((f) => f.toLowerCase().includes(query.toLowerCase()))
-        .map((f) => `${prefix} ${f}`);
-      if (hits.length > 0) return hits;
-    }
-
-    if (parts[0] === "/references" && line.includes(" ")) {
-      const query = line.slice(12).trim();
-      const hits = (this.candidates.symbols || [])
-        .filter((s) => s.toLowerCase().startsWith(query.toLowerCase()))
-        .map((s) => `/references ${s}`);
       if (hits.length > 0) return hits;
     }
 
@@ -636,15 +919,11 @@ export class FullscreenTui {
           models = [
             "deepseek-v4-flash",
             "deepseek-v4-pro",
-            "deepseek-chat",
-            "deepseek-reasoner",
           ];
         } else {
           models = [
             "gpt-4o",
             "gpt-4o-mini",
-            "deepseek-chat",
-            "deepseek-reasoner",
           ];
         }
       } else if (providerType === "ollama") {
@@ -698,108 +977,13 @@ export class FullscreenTui {
       }
     }
 
-    if (parts[0] === "/fork" && line.includes(" ")) {
-      // 1. If it's just "/fork " completing the subcommand
-      if (parts.length <= 2) {
-        const subcommands = ["tree", "switch"];
-        const hits = subcommands
-          .map((sub) => `/fork ${sub}`)
-          .filter((c) => c.startsWith(line));
-        if (hits.length > 0) return hits;
-      }
 
-      // 2. If it's "/fork switch <query>"
-      if (parts.length >= 3 && parts[1] === "switch") {
-        const cmd = parts[0];
-        const sub = parts[1];
-        const query = parts.slice(2).join(" ");
-        const prefix = `${cmd} ${sub} `;
-        const hits = (this.candidates.sessions || [])
-          .filter((s) => {
-            const lowerS = s.toLowerCase();
-            const lowerQ = query.toLowerCase();
-            return (
-              lowerS.startsWith(lowerQ) ||
-              s
-                .replace(/^sess_/, "")
-                .toLowerCase()
-                .startsWith(lowerQ)
-            );
-          })
-          .map((s) => `${prefix}${s}`);
-        if (hits.length > 0) return hits;
-      }
-    }
-
-    if (
-      (parts[0] === "/delete" || parts[0] === "/rm" || parts[0] === "/del") &&
-      line.includes(" ")
-    ) {
-      const prefix = parts[0];
-      const query = line.slice(prefix.length + 1).trim();
-      const hits = (this.candidates.sessions || [])
-        .filter((s) => {
-          const lowerS = s.toLowerCase();
-          const lowerQ = query.toLowerCase();
-          return (
-            lowerS.startsWith(lowerQ) ||
-            s
-              .replace(/^sess_/, "")
-              .toLowerCase()
-              .startsWith(lowerQ)
-          );
-        })
-        .map((s) => `${prefix} ${s}`);
-      if (hits.length > 0) return hits;
-    }
-
-    // Default: Match main commands
-    const BUILTIN_SLASH_COMMANDS = [
-      "/help",
-      "/status",
-      "/config",
-      "/model",
-      "/chat",
-      "/commit",
-      "/exit",
-      "/quit",
-      "/rollback",
-      "/timeline",
-      "/rewind",
-      "/clear",
-      "/compact",
-      "/history",
-      "/edit",
-      "/inspect",
-      "/doc",
-      "/diagnose",
-      "/resolve",
-      "/references",
-      "/run",
-      "/grep",
-      "/api",
-      "/register",
-      "/language",
-      "/fork",
-      "/mode",
-      "/ask",
-      "/code",
-      "/copy",
-      "/copy-context",
-      "/git",
-      "/tokens",
-      "/read-only",
-      "/readonly",
-      "/new",
-      "/reset",
-      "/delete",
-      "/rm",
-      "/del",
-      "/btw",
-      "/memory",
-      "/commands",
-    ];
-    const cmds = this.candidates.commands.length > 0 ? this.candidates.commands : BUILTIN_SLASH_COMMANDS;
+    const cmds =
+      this.candidates &&
+      Array.isArray(this.candidates.commands) &&
+      this.candidates.commands.length > 0
+        ? this.candidates.commands
+        : BUILTIN_SLASH_COMMANDS;
     return cmds.filter((c) => c.startsWith(line));
   }
 
@@ -880,10 +1064,10 @@ export class FullscreenTui {
       return;
     }
 
-    let localAsstIdx = this.history
+    const localAsstIdx = this.history
       .map((m, i) => (m.role === "assistant" ? i : -1))
       .filter((i) => i !== -1);
-    let loopAsst = loopHistory.filter((m: any) => m.role === "assistant");
+    const loopAsst = loopHistory.filter((m: any) => m.role === "assistant");
 
     for (let i = 0; i < loopAsst.length; i++) {
       const loopMsg = loopAsst[i];
@@ -892,11 +1076,13 @@ export class FullscreenTui {
         const localIdx = localAsstIdx[i];
         if (localIdx !== undefined) {
           this.history[localIdx].text = textBlock.text;
+          this.history[localIdx].model = loopMsg.metadata?.model;
         } else {
           this.history.push({
             role: "assistant",
             text: textBlock.text,
             attempt: i + 1,
+            model: loopMsg.metadata?.model,
           });
         }
       }
@@ -928,6 +1114,7 @@ export class FullscreenTui {
           role: "assistant",
           text: textBlock?.text || "",
           attempt,
+          model: msg.metadata?.model,
         });
       } else if (msg.role === "system") {
         const text = msg.content
@@ -973,250 +1160,344 @@ export class FullscreenTui {
       process.stdin.resume();
 
       const onKeypress = (str: string, key: any) => {
-        if (!this.isActive) {
-          cleanup();
-          return;
-        }
+        try {
+          if (!this.isActive) {
+            cleanup();
+            return;
+          }
 
-        if (this.handleScrollInput(str, key)) {
-          return;
-        }
+          if (this.handleScrollInput(str, key)) {
+            return;
+          }
 
-        if (key && key.ctrl && key.name === "c") {
-          this.activeCommandIndex = 0;
-          if (this.inputBuffer.length > 0) {
+          if (key && key.ctrl && key.name === "c") {
+            this.activeCommandIndex = 0;
+            if (this.inputBuffer.length > 0) {
+              this.inputBuffer = "";
+              this.cursorPosition = 0;
+              this.render();
+            } else {
+              if (this.ctrlCPressedOnce) {
+                if (this.ctrlCTimeout) clearTimeout(this.ctrlCTimeout);
+                cleanup();
+                this.stop();
+                process.exit(0);
+              } else {
+                this.ctrlCPressedOnce = true;
+                if (this.ctrlCTimeout) clearTimeout(this.ctrlCTimeout);
+                this.ctrlCTimeout = setTimeout(() => {
+                  this.ctrlCPressedOnce = false;
+                  this.render();
+                }, 2000);
+                this.render();
+              }
+            }
+            return;
+          }
+
+          if (key && (key.name === "return" || key.name === "enter")) {
+            cleanup();
+            process.stdout.write("\x1b[?25l");
+            let submitted = this.inputBuffer;
+            if (this.inputBuffer.startsWith("/")) {
+              const matches = this.getActiveMatches();
+              if (matches.length > 0) {
+                const idx = Math.min(
+                  this.activeCommandIndex,
+                  matches.length - 1,
+                );
+                const match = matches[idx];
+                if (match) {
+                  submitted = match;
+                }
+              }
+            }
+            this.resolveInput = null;
+            this.historyScrollOffset = 0;
+            this.hasNewOutputWhileScrolled = false;
+
+            if (submitted.trim()) {
+              this.history.push({ role: "user", text: submitted });
+              if (
+                this.inputHistory[this.inputHistory.length - 1] !== submitted
+              ) {
+                this.inputHistory.push(submitted);
+                this.saveInputHistory();
+              }
+            }
+            this.historyIndex = -1;
             this.inputBuffer = "";
             this.cursorPosition = 0;
             this.render();
-          } else {
-            if (this.ctrlCPressedOnce) {
-              if (this.ctrlCTimeout) clearTimeout(this.ctrlCTimeout);
-              cleanup();
-              this.stop();
-              process.exit(0);
-            } else {
-              this.ctrlCPressedOnce = true;
-              if (this.ctrlCTimeout) clearTimeout(this.ctrlCTimeout);
-              this.ctrlCTimeout = setTimeout(() => {
-                this.ctrlCPressedOnce = false;
+            resolve(submitted);
+            return;
+          }
+
+          if (key && (key.name === "home" || (key.ctrl && key.name === "a"))) {
+            this.activeCommandIndex = 0;
+            this.cursorPosition = 0;
+            this.render();
+            return;
+          }
+
+          if (key && (key.name === "end" || (key.ctrl && key.name === "e"))) {
+            this.activeCommandIndex = 0;
+            this.cursorPosition = this.inputBuffer.length;
+            this.render();
+            return;
+          }
+
+          if (key && (key.ctrl || key.meta) && key.name === "left") {
+            this.activeCommandIndex = 0;
+            this.cursorPosition = previousWordIndex(
+              this.inputBuffer,
+              this.cursorPosition,
+            );
+            this.render();
+            return;
+          }
+
+          if (key && (key.ctrl || key.meta) && key.name === "right") {
+            this.activeCommandIndex = 0;
+            this.cursorPosition = nextWordIndex(
+              this.inputBuffer,
+              this.cursorPosition,
+            );
+            this.render();
+            return;
+          }
+
+          if (key && key.ctrl && (key.name === "backspace" || key.name === "w")) {
+            this.activeCommandIndex = 0;
+            this.hideAutocomplete = false;
+            if (this.cursorPosition > 0) {
+              const targetPos = previousWordIndex(
+                this.inputBuffer,
+                this.cursorPosition,
+              );
+              this.inputBuffer =
+                this.inputBuffer.slice(0, targetPos) +
+                this.inputBuffer.slice(this.cursorPosition);
+              this.cursorPosition = targetPos;
+              this.render();
+            }
+            return;
+          }
+
+          if (key && key.ctrl && key.name === "delete") {
+            this.activeCommandIndex = 0;
+            this.hideAutocomplete = false;
+            if (this.cursorPosition < this.inputBuffer.length) {
+              const targetPos = nextWordIndex(
+                this.inputBuffer,
+                this.cursorPosition,
+              );
+              this.inputBuffer =
+                this.inputBuffer.slice(0, this.cursorPosition) +
+                this.inputBuffer.slice(targetPos);
+              this.render();
+            }
+            return;
+          }
+
+          if (key && key.ctrl && key.name === "u") {
+            this.activeCommandIndex = 0;
+            this.inputBuffer = "";
+            this.cursorPosition = 0;
+            this.render();
+            return;
+          }
+
+          if (key && key.name === "up") {
+            if (this.inputBuffer.startsWith("/")) {
+              const matches = this.getActiveMatches();
+              if (matches.length > 0) {
+                this.activeCommandIndex =
+                  (this.activeCommandIndex - 1 + matches.length) %
+                  matches.length;
                 this.render();
-              }, 2000);
-              this.render();
+                return;
+              }
             }
-          }
-          return;
-        }
-
-        if (key && (key.name === "return" || key.name === "enter")) {
-          cleanup();
-          process.stdout.write("\x1b[?25l");
-          const submitted = this.inputBuffer;
-          this.resolveInput = null;
-          this.historyScrollOffset = 0;
-          this.hasNewOutputWhileScrolled = false;
-
-          if (submitted.trim()) {
-            this.history.push({ role: "user", text: submitted });
-            if (this.inputHistory[this.inputHistory.length - 1] !== submitted) {
-              this.inputHistory.push(submitted);
-              this.saveInputHistory();
-            }
-          }
-          this.historyIndex = -1;
-          this.inputBuffer = "";
-          this.cursorPosition = 0;
-          this.render();
-          resolve(submitted);
-          return;
-        }
-
-        if (key && key.name === "up") {
-          if (this.inputBuffer.startsWith("/")) {
-            const matches = this.getActiveMatches();
-            if (matches.length > 0) {
-              this.activeCommandIndex =
-                (this.activeCommandIndex - 1 + matches.length) % matches.length;
-              this.render();
-              return;
-            }
-          }
-          if (this.inputHistory.length > 0) {
-            if (this.historyIndex === -1) {
-              this.tempBuffer = this.inputBuffer;
-              this.historyIndex = this.inputHistory.length - 1;
-            } else if (this.historyIndex > 0) {
-              this.historyIndex--;
-            }
-            this.inputBuffer = this.inputHistory[this.historyIndex];
-            this.cursorPosition = this.inputBuffer.length;
-            this.render();
-          }
-          return;
-        }
-
-        if (key && key.name === "down") {
-          if (this.inputBuffer.startsWith("/")) {
-            const matches = this.getActiveMatches();
-            if (matches.length > 0) {
-              this.activeCommandIndex =
-                (this.activeCommandIndex + 1) % matches.length;
-              this.render();
-              return;
-            }
-          }
-          if (this.historyIndex !== -1) {
-            if (this.historyIndex < this.inputHistory.length - 1) {
-              this.historyIndex++;
+            if (this.inputHistory.length > 0) {
+              if (this.historyIndex === -1) {
+                this.tempBuffer = this.inputBuffer;
+                this.historyIndex = this.inputHistory.length - 1;
+              } else if (this.historyIndex > 0) {
+                this.historyIndex--;
+              }
               this.inputBuffer = this.inputHistory[this.historyIndex];
-            } else {
-              this.historyIndex = -1;
-              this.inputBuffer = this.tempBuffer || "";
+              this.cursorPosition = this.inputBuffer.length;
+              this.render();
             }
-            this.cursorPosition = this.inputBuffer.length;
-            this.render();
+            return;
           }
-          return;
-        }
 
-        if (key && key.name === "left") {
-          if (this.cursorPosition > 0) {
-            this.cursorPosition = previousCodePointIndex(
-              this.inputBuffer,
-              this.cursorPosition,
-            );
-            this.render();
+          if (key && key.name === "down") {
+            if (this.inputBuffer.startsWith("/")) {
+              const matches = this.getActiveMatches();
+              if (matches.length > 0) {
+                this.activeCommandIndex =
+                  (this.activeCommandIndex + 1) % matches.length;
+                this.render();
+                return;
+              }
+            }
+            if (this.historyIndex !== -1) {
+              if (this.historyIndex < this.inputHistory.length - 1) {
+                this.historyIndex++;
+                this.inputBuffer = this.inputHistory[this.historyIndex];
+              } else {
+                this.historyIndex = -1;
+                this.inputBuffer = this.tempBuffer || "";
+              }
+              this.cursorPosition = this.inputBuffer.length;
+              this.render();
+            }
+            return;
           }
-          return;
-        }
 
-        if (key && key.name === "right") {
-          if (this.cursorPosition < this.inputBuffer.length) {
-            this.cursorPosition = nextCodePointIndex(
-              this.inputBuffer,
-              this.cursorPosition,
-            );
-            this.render();
-          } else {
+          if (key && key.name === "left") {
+            if (this.cursorPosition > 0) {
+              this.cursorPosition = previousCodePointIndex(
+                this.inputBuffer,
+                this.cursorPosition,
+              );
+              this.render();
+            }
+            return;
+          }
+
+          if (key && key.name === "right") {
+            if (this.cursorPosition < this.inputBuffer.length) {
+              this.cursorPosition = nextCodePointIndex(
+                this.inputBuffer,
+                this.cursorPosition,
+              );
+              this.render();
+            } else {
+              const sug = this.getSuggestion();
+              if (sug) {
+                this.inputBuffer += sug;
+                this.cursorPosition = this.inputBuffer.length;
+                this.render();
+              }
+            }
+            return;
+          }
+
+          if (key && key.name === "tab") {
+            if (this.inputBuffer.startsWith("/")) {
+              const matches = this.getActiveMatches();
+              if (matches.length > 0) {
+                const idx = Math.min(
+                  this.activeCommandIndex,
+                  matches.length - 1,
+                );
+                const match = matches[idx];
+                if (match) {
+                  this.inputBuffer = match;
+                  this.cursorPosition = match.length;
+                  this.activeCommandIndex = 0;
+                  this.render();
+                }
+                return;
+              }
+            }
             const sug = this.getSuggestion();
             if (sug) {
               this.inputBuffer += sug;
               this.cursorPosition = this.inputBuffer.length;
               this.render();
             }
+            return;
           }
-          return;
-        }
 
-        if (key && key.name === "tab") {
-          if (this.inputBuffer.startsWith("/")) {
-            const matches = this.getActiveMatches();
-            if (matches.length > 0) {
-              const idx = Math.min(this.activeCommandIndex, matches.length - 1);
-              const match = matches[idx];
-              if (match) {
-                this.inputBuffer = match;
-                this.cursorPosition = match.length;
-                this.activeCommandIndex = 0;
-                this.render();
-              }
-              return;
-            }
-          }
-          const sug = this.getSuggestion();
-          if (sug) {
-            this.inputBuffer += sug;
-            this.cursorPosition = this.inputBuffer.length;
+          if (key && key.ctrl && key.name === "l") {
+            this.history = [];
             this.render();
+            return;
           }
-          return;
-        }
 
-        if (key && key.ctrl && key.name === "l") {
-          this.history = [];
-          this.render();
-          return;
-        }
-
-        if (key && key.ctrl && key.name === "u") {
-          this.activeCommandIndex = 0;
-          this.inputBuffer = "";
-          this.cursorPosition = 0;
-          this.render();
-          return;
-        }
-
-        if (key && key.ctrl && key.name === "w") {
-          this.activeCommandIndex = 0;
-          const beforeCursor = this.inputBuffer.substring(
-            0,
-            this.cursorPosition,
-          );
-          const afterCursor = this.inputBuffer.substring(this.cursorPosition);
-          const parts = beforeCursor.trimEnd().split(/\s+/);
-          parts.pop();
-          const newBefore = parts.length > 0 ? parts.join(" ") + " " : "";
-          this.inputBuffer = newBefore + afterCursor;
-          this.cursorPosition = newBefore.length;
-          this.render();
-          return;
-        }
-
-        if (key && key.ctrl && key.name === "p") {
-          this.activeCommandIndex = 0;
-          if (!this.inputBuffer.startsWith("/")) {
-            this.inputBuffer = "/" + this.inputBuffer;
-            this.cursorPosition = this.inputBuffer.length;
+          if (key && key.ctrl && key.name === "p") {
+            this.activeCommandIndex = 0;
+            if (!this.inputBuffer.startsWith("/")) {
+              this.inputBuffer = "/" + this.inputBuffer;
+              this.cursorPosition = this.inputBuffer.length;
+            }
+            this.render();
+            return;
           }
-          this.render();
-          return;
-        }
 
-        if (key && key.name === "delete") {
-          this.activeCommandIndex = 0;
-          this.hideAutocomplete = false;
-          if (this.cursorPosition < this.inputBuffer.length) {
-            const nextIndex = nextCodePointIndex(
-              this.inputBuffer,
-              this.cursorPosition,
-            );
+          if (key && key.name === "delete") {
+            this.activeCommandIndex = 0;
+            this.hideAutocomplete = false;
+            if (this.cursorPosition < this.inputBuffer.length) {
+              const nextIndex = nextCodePointIndex(
+                this.inputBuffer,
+                this.cursorPosition,
+              );
+              this.inputBuffer =
+                this.inputBuffer.substring(0, this.cursorPosition) +
+                this.inputBuffer.substring(nextIndex);
+              this.render();
+            }
+            return;
+          }
+
+          if (key && key.name === "backspace") {
+            this.activeCommandIndex = 0;
+            this.hideAutocomplete = false;
+            if (this.cursorPosition > 0) {
+              const previousIndex = previousCodePointIndex(
+                this.inputBuffer,
+                this.cursorPosition,
+              );
+              this.inputBuffer =
+                this.inputBuffer.substring(0, previousIndex) +
+                this.inputBuffer.substring(this.cursorPosition);
+              this.cursorPosition = previousIndex;
+            }
+          } else if (key && key.name === "escape") {
+            this.activeCommandIndex = 0;
+            if (!this.hideAutocomplete) {
+              this.hideAutocomplete = true;
+            } else if (this.inputBuffer.length > 0) {
+              this.inputBuffer = "";
+              this.cursorPosition = 0;
+            }
+            this.render();
+          } else if (
+            str &&
+            !/[\u0000-\u001f\u007f]/.test(str) &&
+            (!key || (!key.ctrl && !key.meta && key.name !== "tab"))
+          ) {
+            this.activeCommandIndex = 0;
+            this.hideAutocomplete = false;
             this.inputBuffer =
               this.inputBuffer.substring(0, this.cursorPosition) +
-              this.inputBuffer.substring(nextIndex);
-            this.render();
-          }
-          return;
-        }
-
-        if (key && key.name === "backspace") {
-          this.activeCommandIndex = 0;
-          this.hideAutocomplete = false;
-          if (this.cursorPosition > 0) {
-            const previousIndex = previousCodePointIndex(
-              this.inputBuffer,
-              this.cursorPosition,
-            );
-            this.inputBuffer =
-              this.inputBuffer.substring(0, previousIndex) +
+              str +
               this.inputBuffer.substring(this.cursorPosition);
-            this.cursorPosition = previousIndex;
+            this.cursorPosition += str.length;
           }
-        } else if (key && key.name === "escape") {
-          this.activeCommandIndex = 0;
-          this.hideAutocomplete = true;
-        } else if (
-          str &&
-          (!key || (!key.ctrl && !key.meta && key.name !== "tab"))
-        ) {
-          this.activeCommandIndex = 0;
-          this.hideAutocomplete = false;
-          this.inputBuffer =
-            this.inputBuffer.substring(0, this.cursorPosition) +
-            str +
-            this.inputBuffer.substring(this.cursorPosition);
-          this.cursorPosition += str.length;
-        }
 
-        this.render();
+          this.render();
+        } catch (error) {
+          const logDir = join(homedir(), ".orbit");
+          try {
+            if (!existsSync(logDir)) {
+              mkdirSync(logDir, { recursive: true });
+            }
+            writeFileSync(
+              join(logDir, "tui_error.log"),
+              `[${new Date().toISOString()}] Error in onKeypress: ${error instanceof Error ? error.stack : error}\n`,
+              { flag: "a" },
+            );
+          } catch {}
+          try {
+            this.render();
+          } catch {}
+        }
       };
 
       const cleanup = () => {
@@ -1319,32 +1600,15 @@ export class FullscreenTui {
     const columns = Math.max(40, process.stdout.columns || 80);
     const rows = Math.max(10, process.stdout.rows || 24);
 
-    const morandi = {
-      user: (s: string) => `\x1b[38;2;142;163;175m${s}\x1b[0m`,
-      userBold: (s: string) => `\x1b[1;38;2;142;163;175m${s}\x1b[0m`,
-      asst: (s: string) => `\x1b[38;2;143;153;129m${s}\x1b[0m`,
-      asstBold: (s: string) => `\x1b[1;38;2;143;153;129m${s}\x1b[0m`,
-      cyan: (s: string) => `\x1b[38;2;142;163;175m${s}\x1b[0m`,
-      accent: (s: string) => `\x1b[38;2;200;170;120m${s}\x1b[0m`,
-      completed: (s: string) => `\x1b[38;2;135;165;130m${s}\x1b[0m`,
-      failed: (s: string) => `\x1b[38;2;180;120;120m${s}\x1b[0m`,
-      warn: (s: string) => `\x1b[38;2;180;140;130m${s}\x1b[0m`,
-      white: (s: string) => `\x1b[38;2;230;225;215m${s}\x1b[0m`,
-      whiteBold: (s: string) => `\x1b[1;38;2;230;225;215m${s}\x1b[0m`,
-      gray: (s: string) => `\x1b[38;2;150;150;150m${s}\x1b[0m`,
-      dim: (s: string) => `\x1b[2;38;2;110;110;110m${s}\x1b[0m`,
-    };
+    // Use the shared MORANDI constant (class-level) instead of recreating per frame
+    const morandi = MORANDI;
 
     const isWaitingInput = this.resolveInput !== null;
     const isInputActive =
       isWaitingInput || this.thinkingKeypressListener !== null;
     const hasInput = isInputActive && this.inputBuffer.length > 0;
     const placeholder = isWaitingInput ? "Ask anything..." : "";
-    const budgetPct =
-      Math.min(
-        100,
-        Math.round((this.sessionCost / (this.budgetLimit || 10)) * 100),
-      ) + "%";
+
 
     // A.1 构建底部的圆角输入框与状态行以及指令匹配浮窗
     const boxWidth = columns - 4;
@@ -1366,7 +1630,7 @@ export class FullscreenTui {
       const rawLine = wrappedLines[i];
       const visualWidth = this.getStringWidth(rawLine);
       const remainingSpaces = wrapWidth - visualWidth;
-      const padding = " ".repeat(remainingSpaces);
+      const padding = " ".repeat(Math.max(0, remainingSpaces));
 
       const lineContent =
         morandi.gray("  │ ") +
@@ -1400,48 +1664,14 @@ export class FullscreenTui {
               "/chat rm": "移除不需要的历史对话会话",
               "/chat switch": "快速切换到指定的历史对话会话",
               "/commit": "自动暂存工作区修改并生成 Git 提交",
-              "/diff": "可视化比对当前工作区的所有代码变更",
-              "/test": "自动化运行项目中的单元测试组件",
-              "/add": "将选定的文件或代码资产添加到当前上下文",
-              "/drop": "从当前对话上下文中移除选定的资产",
-              "/context": "查看并深度分析当前上下文中的文件与代码资产",
               "/exit": "安全终止并关闭当前的终端会话",
               "/quit": "安全终止并关闭当前的终端会话",
               "/rollback": "一键撤销并回滚自会话启动以来的所有修改",
-              "/timeline": "查看当前会话可恢复的文件检查点时间线",
-              "/rewind": "将工作区回退到指定的持久化检查点",
               "/clear": "清空当前终端屏幕的所有历史会话渲染",
-              "/compact": "智能压缩当前对话历史以节省 Prompt 词量",
-              "/history": "浏览并重放执行过的历史命令列表",
-              "/edit": "交互式编辑工作区与代理的核心配置文件",
-              "/inspect": "深度分析并检查当前工作区的工程结构",
-              "/doc": "为工作区代码自动分析并生成 JSDoc 文档",
-              "/diagnose": "智能扫描并一键修复工作区中的构建/编译错误",
-              "/resolve": "自动检测并半自动解决工作区中的代码合并冲突",
-              "/references": "快速查找指定符号/类/函数在工作区中的引用",
-              "/run": "在外部终端沙箱中直接执行 Shell 命令",
-              "/grep": "在工作区文件内容中全局检索特定字符串/正则表达式",
-              "/language": "一键在英文与中文之间切换终端显示语言",
-              "/api": "交互式配置与测试模型提供商的 API 密钥及地址",
-              "/register": "为代理运行时动态注册并挂载新的外部工具",
-              "/fork": "分支/复刻当前会话到新会话",
+              "/add": "将选定的文件或代码资产添加到当前上下文",
+              "/drop": "从当前对话上下文中移除选定的资产",
               "/mode": "动态切换系统安全确认模式 (strict, normal, auto, plan)",
-              "/ask": "一键切换至 strict 安全模式 (只读/高安全级)",
-              "/code": "一键切换至 normal 安全模式 (默认可编辑模式)",
               "/copy": "拷贝 AI 的上一条回复到系统剪贴板",
-              "/copy-context": "拷贝当前活动上下文文件列表到系统剪贴板",
-              "/git": "在沙箱终端中直接执行 Git 命令",
-              "/tokens": "展示当前会话详细的 Token 使用量与估算成本",
-              "/read-only": "添加文件到当前上下文为只读参考资料",
-              "/readonly": "添加文件到当前上下文为只读参考资料",
-              "/btw": "问一个快捷问题而不污染当前会话的上下文历史",
-              "/memory": "查看项目本地的 AGENTS.md 规则与记忆文件",
-              "/commands": "列出项目级与用户级自定义提示命令",
-              "/new": "创建一个全新的对话会话 (快捷键)",
-              "/reset": "重置当前会话历史开始新对话 (快捷键)",
-              "/delete": "删除指定会话或弹出删除菜单",
-              "/rm": "删除指定会话或弹出删除菜单",
-              "/del": "删除指定会话或弹出删除菜单",
             }
           : {
               "/help": "Display detailed help and commands reference",
@@ -1457,53 +1687,14 @@ export class FullscreenTui {
               "/chat rm": "Remove a saved session from the manager",
               "/chat switch": "Switch focus to a specific saved session",
               "/commit": "Automatically stage changes and create Git commit",
-              "/diff": "Interactively view file diffs in the workspace",
-              "/test": "Run workspace test suites automatically",
-              "/add": "Add files or code symbols to prompt context",
-              "/drop": "Remove selected assets from prompt context",
-              "/context":
-                "Inspect the assembled active context package and assets",
               "/exit": "Safely terminate and exit the active session",
               "/quit": "Safely terminate and exit the active session",
               "/rollback": "Revert all source edits made during this session",
-              "/timeline": "Inspect the persistent checkpoint timeline",
-              "/rewind": "Rewind the workspace to a selected checkpoint",
               "/clear": "Clear the terminal screen and scrollback buffer",
-              "/compact": "Compress chat history to optimize token usage",
-              "/history": "View and replay previously executed commands",
-              "/edit": "Configure agent options via interactive editor",
-              "/inspect": "Inspect workspace structure and boundary status",
-              "/doc":
-                "Generate high-quality documentation for codebase symbols",
-              "/diagnose": "Scan workspace and diagnose/fix build issues",
-              "/resolve": "Scan and help resolve Git merge conflicts",
-              "/references": "Find references and usages of a codebase symbol",
-              "/run":
-                "Execute a shell command directly in the terminal sandbox",
-              "/grep":
-                "Perform global search for patterns across workspace files",
-              "/language": "Switch display language between English & Chinese",
-              "/api": "Configure base URL and credentials for APIs",
-              "/register": "Register new runtime tools dynamically",
-              "/fork": "Fork the current session history into a branch",
+              "/add": "Add files or code symbols to prompt context",
+              "/drop": "Remove selected assets from prompt context",
               "/mode": "Switch permission mode (strict, normal, auto, plan)",
-              "/ask": "Shortcut for strict read-only mode",
-              "/code": "Shortcut for normal default editing mode",
               "/copy": "Copy last assistant response to clipboard",
-              "/copy-context": "Copy active context files list to clipboard",
-              "/git": "Execute a git command in the sandbox",
-              "/tokens": "Display session token usage and details",
-              "/read-only": "Add files to context as read-only references",
-              "/readonly": "Add files to context as read-only references",
-              "/btw":
-                "Ask a quick side-question without polluting active history",
-              "/memory": "View the workspace memory / AGENTS.md guidelines",
-              "/commands": "List project and user custom prompt commands",
-              "/new": "Create a brand new chat session (shortcut)",
-              "/reset": "Reset history and start a fresh session (shortcut)",
-              "/delete": "Delete a session by ID/idx or open deletion menu",
-              "/rm": "Delete a session by ID/idx or open deletion menu",
-              "/del": "Delete a session by ID/idx or open deletion menu",
             };
 
         const maxVisible = 5;
@@ -1523,8 +1714,6 @@ export class FullscreenTui {
           const isSelected =
             visibleMatches.indexOf(cmd) + startIdx === this.activeCommandIndex;
           const prefix = isSelected ? " ❯ " : "   ";
-          const leftPart = `${prefix}${cmd}`;
-          const leftW = this.getStringWidth(leftPart);
 
           let hint = cmdHints[cmd] || "";
           if (!hint) {
@@ -1546,20 +1735,32 @@ export class FullscreenTui {
             }
           }
 
+          // Ensure prefix + cmd + hint fits within maxPopupWidth.
+          // maxPopupWidth is at least 30. We keep at least 15 columns for leftPart.
+          const maxLeftW = Math.max(15, Math.floor(maxPopupWidth * 0.6));
+
+          let leftPart = `${prefix}${cmd}`;
+          let leftW = this.getStringWidth(leftPart);
+          if (leftW > maxLeftW) {
+            leftPart = this.truncateToWidth(leftPart, maxLeftW - 3) + "...";
+            leftW = this.getStringWidth(leftPart);
+          }
+
           let rightPart = "";
           let rightW = 0;
           if (hint) {
-            const rawRightPart = hint;
-            const rawRightW = this.getStringWidth(rawRightPart);
-            const maxRightW = maxPopupWidth - leftW - 2;
-            if (rawRightW <= maxRightW) {
-              rightPart = rawRightPart;
-              rightW = rawRightW;
-            } else if (maxRightW >= 5) {
-              const maxHintW = maxRightW - 3;
-              const truncatedHint = this.truncateToWidth(hint, maxHintW);
-              rightPart = `${truncatedHint}...`;
-              rightW = this.getStringWidth(rightPart);
+            // Available right-part width: popupWidth minus leftW, minus 1 (min spacing), minus 4 (rightPadding)
+          const availableRightW = maxPopupWidth - leftW - 1 - 4;
+            if (availableRightW >= 5) {
+              const rawRightW = this.getStringWidth(hint);
+              if (rawRightW <= availableRightW) {
+                rightPart = hint;
+                rightW = rawRightW;
+              } else {
+                rightPart =
+                  this.truncateToWidth(hint, availableRightW - 3) + "...";
+                rightW = this.getStringWidth(rightPart);
+              }
             }
           }
 
@@ -1570,18 +1771,20 @@ export class FullscreenTui {
 
         bottomLines.push(morandi.gray("  ╭" + "─".repeat(popupWidth) + "╮"));
         for (const fm of formattedMatches) {
-          const spacingWidth = popupWidth - fm.leftW - fm.rightW;
-          const spacing = " ".repeat(spacingWidth);
+          const spacingWidth = popupWidth - fm.leftW - fm.rightW - 4;
+          const spacing = " ".repeat(Math.max(1, spacingWidth));
+          const rightPadding = "    ";
 
           const formattedLine = fm.isSelected
-            ? morandi.accent(fm.leftPart + spacing) + morandi.dim(fm.rightPart)
-            : morandi.gray(fm.leftPart + spacing) + morandi.dim(fm.rightPart);
+            ? morandi.accent(fm.leftPart + spacing) + morandi.dim(fm.rightPart) + rightPadding
+            : morandi.gray(fm.leftPart + spacing) + morandi.dim(fm.rightPart) + rightPadding;
 
           bottomLines.push(
             morandi.gray("  │") + formattedLine + morandi.gray("│"),
           );
         }
         bottomLines.push(morandi.gray("  ╰" + "─".repeat(popupWidth) + "╯"));
+
       }
     }
 
@@ -1609,12 +1812,15 @@ export class FullscreenTui {
     } else {
       const cleanModel =
         this.modelNameGetter().split("/").pop() || this.modelNameGetter();
+      const costStr = `$` + this.sessionCost.toFixed(4);
       statusText =
         morandi.completed("●") +
         " " +
         morandi.white(`${mode} MODE`) +
         morandi.gray("  ·  ") +
         morandi.accent(cleanModel) +
+        morandi.gray("  ·  ") +
+        morandi.accent(costStr) +
         morandi.gray("  ·  ") +
         morandi.dim(`attempt: ${this.currentAttempt || 1}`);
     }
@@ -1657,25 +1863,35 @@ export class FullscreenTui {
     const bottomHeight = bottomLines.length;
 
     // 全屏渲染逻辑（当无法增量时）
-    const cleanModel = this.modelNameGetter().replace(/\[1m\]/g, "");
+    // Strip all ANSI escape sequences (e.g. \x1b[1m bold) from the model name
+    const cleanModel = this.modelNameGetter().replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
 
     // 1. 获取 Git 当前分支与状态（短时缓存，避免流式输出期间阻塞重绘）
     const gitSummary = this.getGitSummary();
     const gitBranch = gitSummary.branch;
 
     // 2. 渲染左上角像素行星 Logo 及其右侧信息
+    const heartColor = this.getNpmNeedsUpdate()
+      ? `\x1b[38;2;230;190;80m` // Soft Morandi yellow
+      : `\x1b[38;2;230;110;110m`; // Soft Morandi red
+
     const logoLines = [
       `\x1b[38;2;142;163;175m  /\\___/\\  \x1b[0m`,
       `\x1b[38;2;142;163;175m (  o.o  ) \x1b[0m`,
-      `\x1b[38;2;142;163;175m  / >\x1b[38;2;230;110;110m♥\x1b[38;2;142;163;175m< \\  \x1b[0m`,
+      `\x1b[38;2;142;163;175m  / >${heartColor}♥\x1b[38;2;142;163;175m< \\  \x1b[0m`,
       `\x1b[38;2;142;163;175m (__/ \\__) \x1b[0m`,
     ];
 
-    const w0 = this.getStringWidth(logoLines[0]);
-    const w1 = this.getStringWidth(logoLines[1]);
-    const w2 = this.getStringWidth(logoLines[2]);
-    const w3 = this.getStringWidth(logoLines[3]);
-    const maxLogoW = Math.max(w0, w1, w2, w3);
+    // Logo widths are static — cache them to avoid re-computation every render frame
+    if (!this._cachedLogoWidths) {
+      const w0 = this.getStringWidth(logoLines[0]);
+      const w1 = this.getStringWidth(logoLines[1]);
+      const w2 = this.getStringWidth(logoLines[2]);
+      const w3 = this.getStringWidth(logoLines[3]);
+      const maxW = Math.max(w0, w1, w2, w3);
+      this._cachedLogoWidths = { w0, w1, w2, w3, maxW };
+    }
+    const { w0, w1, w2, w3, maxW: maxLogoW } = this._cachedLogoWidths;
 
     const pad0 = " ".repeat(maxLogoW - w0);
     const pad1 = " ".repeat(maxLogoW - w1);
@@ -1699,7 +1915,7 @@ export class FullscreenTui {
         gitBranch.length > maxBranchLen
           ? gitBranch.substring(0, maxBranchLen - 3) + "..."
           : gitBranch;
-      branchText = `  ${morandi.dim("·")}  branch:${morandi.asst(displayBranch)}${gitStatusStats ? morandi.accent(gitStatusStats) : ""}`;
+      branchText = `  ${morandi.dim("·")}  ${morandi.dim("⎇")} ${morandi.asst(displayBranch)}${gitStatusStats ? " " + morandi.accent(gitStatusStats) : ""}`;
     }
 
     // Helper to truncate path from middle/beginning to make it fit maxPathWidth
@@ -1748,38 +1964,28 @@ export class FullscreenTui {
     const cleanHeaderModel = cleanModel.split("/").pop() || cleanModel;
     let headerLines: string[];
     if (columns < 76) {
-      const modelWidth = Math.max(8, columns - 16);
-      const displayModel =
-        this.getStringWidth(cleanHeaderModel) > modelWidth
-          ? this.truncateToWidth(cleanHeaderModel, modelWidth - 3) + "..."
-          : cleanHeaderModel;
       const compactPath = truncatePath(shortCwd, Math.max(8, columns - 15));
       const compactBranch =
         gitBranch === "no-git"
           ? ""
           : ` · ${gitBranch.length > 12 ? gitBranch.slice(0, 9) + "..." : gitBranch}`;
       headerLines = [
-        `  ${morandi.whiteBold("O R B I T")} ${morandi.dim("·")} ${morandi.accent(displayModel)}`,
+        `  ${morandi.whiteBold("O R B I T")}`,
         `  ${morandi.dim("workspace:")} ${morandi.gray(compactPath)}`,
         `  ${morandi.dim(cacheText)}${morandi.dim(compactBranch)}`,
       ];
     } else {
-      const headerLine1 = `  ${logoLines[0]}${pad0}  ${morandi.whiteBold("O R B I T")} ${morandi.dim("·")} ${morandi.accent(cleanHeaderModel)}`;
-      const headerLine2 = `  ${logoLines[1]}${pad1}  ${" ".repeat(20)}${morandi.dim("workspace:")} ${morandi.gray(displayPath)}${branchText}`;
-      const headerLine3 = `  ${logoLines[2]}${pad2}  ${" ".repeat(20)}${morandi.dim(cacheText)}`;
+      const headerLine1 = `  ${logoLines[0]}${pad0}`;
+      const headerLine2 = `  ${logoLines[1]}${pad1}  ${morandi.whiteBold("O R B I T")}      ${morandi.dim("workspace:")} ${morandi.gray(displayPath)}${branchText}`;
+      const headerLine3 = `  ${logoLines[2]}${pad2}                 ${morandi.dim(cacheText)}`;
       const headerLine4 = `  ${logoLines[3]}${pad3}`;
       headerLines = [headerLine1, headerLine2, headerLine3, headerLine4];
     }
 
     // 3. 构建历史对话内容
-    let renderedLines: string[] = [];
+    const renderedLines: string[] = [];
 
-    interface TuiTurn {
-      user: any;
-      assistant?: any;
-      system: any[];
-    }
-
+    // TuiTurn is now defined at file level above the class
     const turns: TuiTurn[] = [];
     let currentTurn: TuiTurn | null = null;
 
@@ -1940,13 +2146,15 @@ export class FullscreenTui {
           asstLines.push(...asstObj._formattedCached);
         }
 
+        const turnModel = turn.assistant?.model || cleanModel;
+        const cleanTurnModel = turnModel.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
         let footerStatusLine = "";
         const lastSys = turn.system[turn.system.length - 1];
         if (lastSys && lastSys.text.includes("Failed")) {
-          footerStatusLine = `${morandi.failed("failed")}  ·  ${morandi.dim(cleanModel)}`;
+          footerStatusLine = `${morandi.failed("failed")}  ·  ${morandi.dim(cleanTurnModel)}`;
         } else if (turn.assistant.totalTime !== undefined) {
           const sec = (turn.assistant.totalTime / 1000).toFixed(1);
-          footerStatusLine = `${morandi.completed("completed")}  ·  ${morandi.dim(cleanModel)}  ·  ${morandi.dim(sec + "s")}`;
+          footerStatusLine = `${morandi.completed("completed")}  ·  ${morandi.dim(cleanTurnModel)}  ·  ${morandi.dim(sec + "s")}`;
         }
 
         if (footerStatusLine) {
@@ -1960,7 +2168,7 @@ export class FullscreenTui {
         }
 
         renderedLines.push(
-          "    " + morandi.asstBold(`🤖 Orbit (${cleanModel})`),
+          "    " + morandi.asstBold(`🤖 Orbit (${cleanTurnModel})`),
         );
         renderedLines.push(aBorder);
         for (const line of wrappedAsstLines) {
@@ -1986,38 +2194,53 @@ export class FullscreenTui {
 
       planContent.push("  " + morandi.accent("📋 Active Plan:"));
 
-      const completedCount = planItems.filter(
-        (item, idx) => item.startsWith("- [x]") && idx < activeIndex,
-      ).length;
-      if (completedCount > 0) {
-        const cleanCompletedText = `${completedCount} step${completedCount > 1 ? "s" : ""} completed`;
+      const startPlanIdx = Math.max(0, activeIndex - 1);
+      const endPlanIdx = Math.min(planItems.length - 1, activeIndex + 1);
+
+      if (startPlanIdx > 0) {
         planContent.push(
-          "    " +
-            morandi.completed("✔") +
-            " " +
-            morandi.gray(cleanCompletedText),
+          "    " + morandi.dim(`... ${startPlanIdx} step(s) completed`),
         );
       }
 
-      const activeItem = planItems[activeIndex];
-      if (activeItem) {
-        const text = activeItem.substring(5).trim();
-        const isCurrentRunning = activeItem.startsWith("- [/]");
-        const prefixSymbol = isCurrentRunning
-          ? morandi.accent("▸")
-          : morandi.dim("○");
+      for (let i = startPlanIdx; i <= endPlanIdx; i++) {
+        const item = planItems[i];
+        const text = item.substring(5).trim();
+        const isCurrentRunning =
+          item.startsWith("- [/]") || item.startsWith("- [/");
+        const isCompleted = item.startsWith("- [x]") || item.startsWith("- [x");
+
+        let prefixSymbol = "";
+        if (isCurrentRunning) {
+          prefixSymbol = morandi.accent("●");
+        } else if (isCompleted) {
+          prefixSymbol = morandi.completed("✔");
+        } else {
+          prefixSymbol = morandi.gray("○");
+        }
 
         let displayText = text;
-        const maxTextLen = columns - 10;
+        const maxTextLen = columns - 12;
         const displayW = this.getStringWidth(displayText);
         if (displayW > maxTextLen) {
           displayText =
             this.truncateToWidth(displayText, maxTextLen - 3) + "...";
         }
+
         const coloredText = isCurrentRunning
           ? morandi.whiteBold(displayText)
-          : morandi.dim(displayText);
+          : isCompleted
+            ? morandi.dim(displayText)
+            : morandi.gray(displayText);
+
         planContent.push("    " + prefixSymbol + " " + coloredText);
+      }
+
+      if (endPlanIdx < planItems.length - 1) {
+        const remaining = planItems.length - 1 - endPlanIdx;
+        planContent.push(
+          "    " + morandi.dim(`... ${remaining} step(s) pending`),
+        );
       }
       planText = planContent.join("\n") + "\n\n";
     }
@@ -2029,8 +2252,8 @@ export class FullscreenTui {
       contextLines.push("  " + morandi.accent("📎 Context Files:"));
 
       const filesStr = this.activeContextFiles
-        .map((f) => f.path + ((f as any).readOnly ? " (RO)" : ""))
-        .join(", ");
+        .map((f) => `[${f.path}${f.readOnly ? " 🔒" : ""}]`)
+        .join("  ");
       const maxW = columns - 10;
       const wrappedFiles = this.wrapLine(filesStr, maxW);
       for (const line of wrappedFiles) {
@@ -2046,7 +2269,7 @@ export class FullscreenTui {
     // 留出 1 行用于历史记录与输入框之间的空行间隔
     const maxContentRows = Math.max(1, rows - bottomHeight - headerHeight - 1);
 
-    let flatLines: string[] = [];
+    const flatLines: string[] = [];
     for (const item of renderedLines) {
       flatLines.push(...item.split("\n"));
     }
@@ -2068,7 +2291,7 @@ export class FullscreenTui {
       this.maxHistoryScrollOffset,
     );
 
-    let finalLines: string[] = [];
+    const finalLines: string[] = [];
     let totalLinesCount = 0;
 
     const visibleEnd = Math.max(0, flatLines.length - this.historyScrollOffset);
@@ -2148,8 +2371,8 @@ export class FullscreenTui {
         }
         tempLen += line.length;
       }
-      const lineStartX =
-        cursorLineIndex === 0 ? this.getStringWidth("  │ orbit > ") : 12;
+      // Use pre-calculated constant for the input prefix width instead of recomputing
+      const lineStartX = cursorLineIndex === 0 ? INPUT_PREFIX_WIDTH : 12;
       const targetX = lineStartX + xOffset;
       const linesUp = formattedLines.length - cursorLineIndex + 1; // 距离状态行向上数 linesUp 行
       cursorSequence = `\x1b[${linesUp}A\x1b[${targetX + 1}G\x1b[?25h`;
@@ -2194,8 +2417,7 @@ export class FullscreenTui {
         }
         tempLen += line.length;
       }
-      const lineStartX =
-        cursorLineIndex === 0 ? this.getStringWidth("  │ orbit > ") : 12;
+      const lineStartX = cursorLineIndex === 0 ? INPUT_PREFIX_WIDTH : 12;
       const targetX = lineStartX + xOffset;
       const linesUp = formattedLines.length - cursorLineIndex + 1; // 距离状态行向上数 linesUp 行
       cursorSequence = `\x1b[${linesUp}A\x1b[${targetX + 1}G\x1b[?25h`;
@@ -2294,7 +2516,7 @@ export class FullscreenTui {
         continue;
       }
 
-      const char = line.charAt(i);
+
       const code = line.codePointAt(i);
       let charLen = 1;
       if (code && code > 0xffff) {

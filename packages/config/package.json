@@ -1,15 +1,28 @@
 {
-  "name": "@orbit-ai/config",
+  "name": "@orbit-build/config",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts"
+    "build": "tsup src/index.ts --format esm --dts --clean"
   },
   "dependencies": {
-    "@orbit-ai/shared": "workspace:*",
+    "@orbit-build/shared": "workspace:*",
     "zod": "^3.23.8",
     "yaml": "^2.4.5"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

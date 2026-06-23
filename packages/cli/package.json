@@ -1,5 +1,5 @@
 {
-  "name": "@orbit-ai/cli",
+  "name": "@orbit-build/cli",
   "version": "0.1.0",
   "type": "module",
   "bin": {
@@ -7,17 +7,30 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts"
+    "build": "tsup src/index.ts --format esm --dts --clean"
   },
   "dependencies": {
-    "@orbit-ai/shared": "workspace:*",
-    "@orbit-ai/config": "workspace:*",
-    "@orbit-ai/core": "workspace:*",
-    "@orbit-ai/tui": "workspace:*",
-    "@orbit-ai/model-providers": "workspace:*",
-    "@orbit-ai/context-engine": "workspace:*",
-    "@orbit-ai/permissions": "workspace:*",
+    "@orbit-build/shared": "workspace:*",
+    "@orbit-build/config": "workspace:*",
+    "@orbit-build/core": "workspace:*",
+    "@orbit-build/tui": "workspace:*",
+    "@orbit-build/model-providers": "workspace:*",
+    "@orbit-build/context-engine": "workspace:*",
+    "@orbit-build/permissions": "workspace:*",
     "picocolors": "^1.0.1",
     "commander": "^12.1.0",
     "fast-glob": "^3.3.2",
@@ -25,3 +38,4 @@
     "zod": "^3.23.8"
   }
 }
+

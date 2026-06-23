@@ -1,5 +1,3 @@
-import picocolors from "picocolors";
-
 const morandi = {
   user: (s: string) => `\x1b[38;2;142;163;175m${s}\x1b[0m`,
   userBold: (s: string) => `\x1b[1;38;2;142;163;175m${s}\x1b[0m`,
@@ -15,6 +13,48 @@ const morandi = {
   gray: (s: string) => `\x1b[38;2;150;150;150m${s}\x1b[0m`,
   dim: (s: string) => `\x1b[2;38;2;110;110;110m${s}\x1b[0m`,
 };
+
+function syntaxHighlight(line: string): string {
+  const commentIdx = line.indexOf("//");
+  let codePart = line;
+  let commentPart = "";
+  if (commentIdx !== -1) {
+    codePart = line.substring(0, commentIdx);
+    commentPart = line.substring(commentIdx);
+  }
+
+  let highlighted = codePart;
+
+  const stringPlaceholders: string[] = [];
+  highlighted = highlighted.replace(/(["'`])(.*?)\1/g, (match) => {
+    const placeholder = `___STR_PLACEHOLDER_${stringPlaceholders.length}___`;
+    stringPlaceholders.push(match);
+    return placeholder;
+  });
+
+  const keywords = [
+    "const", "let", "var", "function", "class", "interface", "type", "import", "from",
+    "export", "default", "return", "if", "else", "for", "while", "do", "switch", "case",
+    "break", "continue", "async", "await", "public", "private", "protected", "readonly",
+    "new", "this", "super", "try", "catch", "finally", "throw", "extends", "implements"
+  ];
+  const keywordRegex = new RegExp(`\\b(${keywords.join("|")})\\b`, "g");
+  highlighted = highlighted.replace(keywordRegex, (match) => {
+    return `\x1b[38;2;200;140;180m${match}\x1b[0m`; // Pinkish keyword
+  });
+
+  highlighted = highlighted.replace(/\b(\d+)\b/g, (match) => {
+    return `\x1b[38;2;200;170;120m${match}\x1b[0m`; // Orange/yellow numbers
+  });
+
+  for (let i = 0; i < stringPlaceholders.length; i++) {
+    const originalString = stringPlaceholders[i];
+    const greenStr = `\x1b[38;2;135;165;130m${originalString}\x1b[0m`;
+    highlighted = highlighted.replace(`___STR_PLACEHOLDER_${i}___`, greenStr);
+  }
+
+  return highlighted + (commentPart ? `\x1b[38;2;150;150;150m${commentPart}\x1b[0m` : "");
+}
 
 export class Renderer {
   public static printHeader(
@@ -79,31 +119,26 @@ export class Renderer {
         while (codeLines.length > 0 && !codeLines[codeLines.length - 1].trim())
           codeLines.pop();
 
+        const topBorder = morandi.gray(
+          "  ╭── Code " +
+            (lang ? `[${lang}] ` : "") +
+            "─".repeat(Math.max(5, 48 - (lang ? lang.length + 9 : 0)))
+        );
+        const bottomBorder = morandi.gray("  ╰" + "─".repeat(57));
+
         const formattedBlock = codeLines
           .map((l) => {
-            const commentIdx = l.indexOf("//");
-            if (commentIdx !== -1) {
-              const code = l.substring(0, commentIdx);
-              const comment = l.substring(commentIdx);
-              return (
-                morandi.gray("| ") + morandi.cyan(code) + morandi.gray(comment)
-              );
-            }
-            return morandi.gray("| ") + morandi.cyan(l);
+            return morandi.gray("  │ ") + syntaxHighlight(l);
           })
           .join("\n");
 
         result +=
           "\n" +
-          morandi.gray(
-            "+-- Code " +
-              (lang ? `[${lang}] ` : "") +
-              "-".repeat(Math.max(5, 40 - (lang ? lang.length + 9 : 0))),
-          ) +
+          topBorder +
           "\n" +
           formattedBlock +
           "\n" +
-          morandi.gray("+" + "-".repeat(48)) +
+          bottomBorder +
           "\n";
       } else {
         let blockText = parts[i];

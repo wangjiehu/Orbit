@@ -1,7 +1,7 @@
 import { join } from "path";
 import { promises as fsPromises } from "fs";
-import { estimateTokenCount } from "@orbit-ai/shared";
-import { ConfigLoader } from "@orbit-ai/config";
+import { estimateTokenCount } from "@orbit-build/shared";
+import { ConfigLoader } from "@orbit-build/config";
 import { ContextPack } from "./types.js";
 import { ProjectIndexer } from "./ProjectIndexer.js";
 import { FileSummarizer } from "./FileSummarizer.js";

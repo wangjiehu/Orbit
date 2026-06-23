@@ -1,14 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { runAgent } from "./run.js";
-import { eventBus } from "@orbit-ai/core";
-import { ConfigLoader } from "@orbit-ai/config";
+import { eventBus } from "@orbit-build/core";
+import { ConfigLoader } from "@orbit-build/config";
 import fs from "fs";
 import path from "path";
 import { tmpdir } from "os";
 
 // Mock AgentLoop to avoid actual provider calls
-vi.mock("@orbit-ai/core", async () => {
-  const actual = await vi.importActual<typeof import("@orbit-ai/core")>("@orbit-ai/core");
+vi.mock("@orbit-build/core", async () => {
+  const actual = await vi.importActual<typeof import("@orbit-build/core")>("@orbit-build/core");
   
   class MockAgentLoop {
     constructor(

@@ -116,15 +116,38 @@ export class DeepSeekAnthropicProvider implements ModelProvider {
       };
     });
 
-    const systemParam = systemPrompt
-      ? [
-          {
-            type: "text" as const,
-            text: systemPrompt,
-            cache_control: { type: "ephemeral" as const },
-          },
-        ]
-      : undefined;
+    // Split system prompt at CACHE_BOUNDARY marker for optimal cache breakpoints.
+    // Layer 1 (stable prefix): core rules + tool schemas + repo map → cached across turns
+    // Layer 2 (dynamic suffix): RAG context + file excerpts → changes per turn
+    const CACHE_BOUNDARY = "\n<!-- CACHE_BOUNDARY -->";
+    let systemParam: any[] | undefined;
+
+    if (systemPrompt && systemPrompt.includes(CACHE_BOUNDARY)) {
+      const splitIdx = systemPrompt.indexOf(CACHE_BOUNDARY);
+      const stablePrefix = systemPrompt.substring(0, splitIdx);
+      const dynamicSuffix = systemPrompt.substring(splitIdx + CACHE_BOUNDARY.length);
+
+      systemParam = [
+        {
+          type: "text" as const,
+          text: stablePrefix,
+          cache_control: { type: "ephemeral" as const },
+        },
+        {
+          type: "text" as const,
+          text: dynamicSuffix,
+          cache_control: { type: "ephemeral" as const },
+        },
+      ];
+    } else if (systemPrompt) {
+      systemParam = [
+        {
+          type: "text" as const,
+          text: systemPrompt,
+          cache_control: { type: "ephemeral" as const },
+        },
+      ];
+    }
 
     if (this.capabilities.promptCaching && anthropicMessages.length > 0) {
       const lastMsg = anthropicMessages[anthropicMessages.length - 1];
@@ -141,6 +164,10 @@ export class DeepSeekAnthropicProvider implements ModelProvider {
       system: systemParam,
       stream: input.stream !== false,
     };
+
+    if (input.userId) {
+      body.metadata = { user_id: input.userId };
+    }
 
     if (tools && tools.length > 0) {
       body.tools = tools;
