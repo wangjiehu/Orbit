@@ -10,35 +10,92 @@ import {
 import picocolors from "picocolors";
 import readline from "readline";
 
+export type PromptOption = {
+  value: string;
+  label: string;
+  hint?: string;
+  deleteDisabled?: boolean;
+};
+
+export type SelectWithDeleteResult =
+  | { action: "select"; value: string }
+  | { action: "delete"; value: string }
+  | { action: "cancel" };
+
 export class Prompt {
+  public static tuiInstance: any = null;
+
+  public static setTuiInstance(tui: any) {
+    this.tuiInstance = tui;
+  }
+
+  private static async wrapPrompt<T>(promptFn: () => Promise<T>): Promise<T> {
+    const onKeypress = (str: any, key: any) => {
+      if (key && key.name === "escape") {
+        process.stdin.emit("keypress", "\u0003", { ctrl: true, name: "c" });
+      }
+    };
+    process.stdin.on("keypress", onKeypress);
+    try {
+      return await promptFn();
+    } finally {
+      process.stdin.removeListener("keypress", onKeypress);
+    }
+  }
+
   public static async askPassword(message: string): Promise<string | null> {
-    const response = await password({
-      message,
-      mask: "*",
+    if (this.tuiInstance && this.tuiInstance.isActive) {
+      return this.tuiInstance.showPrompt({
+        type: "password",
+        message,
+      });
+    }
+    return this.wrapPrompt(async () => {
+      const response = await password({
+        message,
+        mask: "*",
+      });
+      if (isCancel(response)) return null;
+      return typeof response === "string" ? response : "";
     });
-    if (isCancel(response)) return null;
-    return typeof response === "string" ? response : "";
   }
 
   public static async askApproval(message: string): Promise<boolean> {
-    const response = await confirm({
-      message: `${picocolors.yellow(message)} Approve?`,
+    if (this.tuiInstance && this.tuiInstance.isActive) {
+      return this.tuiInstance.showPrompt({
+        type: "confirm",
+        message,
+      });
+    }
+    return this.wrapPrompt(async () => {
+      const response = await confirm({
+        message: `${picocolors.yellow(message)} Approve?`,
+      });
+      if (isCancel(response)) return false;
+      return !!response;
     });
-    if (isCancel(response)) return false;
-    return !!response;
   }
 
   public static async askText(
     message: string,
     initialValue?: string,
   ): Promise<string | null> {
-    const response = await text({
-      message,
-      placeholder: "Type your task or command...",
-      initialValue,
+    if (this.tuiInstance && this.tuiInstance.isActive) {
+      return this.tuiInstance.showPrompt({
+        type: "text",
+        message,
+        initialValue,
+      });
+    }
+    return this.wrapPrompt(async () => {
+      const response = await text({
+        message,
+        placeholder: "Type your task or command...",
+        initialValue,
+      });
+      if (isCancel(response)) return null;
+      return typeof response === "string" ? response : "";
     });
-    if (isCancel(response)) return null;
-    return typeof response === "string" ? response : "";
   }
 
   public static async askTextWithAutocomplete(
@@ -121,6 +178,14 @@ export class Prompt {
       const originalTtyWrite = (rl as any)._ttyWrite;
       if (originalTtyWrite) {
         (rl as any)._ttyWrite = function (char: any, key: any) {
+          if (key && key.name === "escape") {
+            clearSuggestions();
+            rl.close();
+            process.stdout.write("\n");
+            resolve(null);
+            return;
+          }
+
           if (
             currentSuggestion &&
             key &&
@@ -167,27 +232,82 @@ export class Prompt {
 
   public static async askSelect(
     message: string,
-    options: { value: string; label: string }[],
+    options: PromptOption[],
   ): Promise<string | null> {
-    const response = await select({
-      message,
-      options,
+    if (this.tuiInstance && this.tuiInstance.isActive) {
+      const response = await this.tuiInstance.showPrompt({
+        type: "select",
+        message,
+        options,
+      });
+      if (response && typeof response === "object" && "action" in response) {
+        return response.action === "select" ? response.value : null;
+      }
+      return typeof response === "string" ? response : null;
+    }
+    return this.wrapPrompt(async () => {
+      const response = await select({
+        message,
+        options,
+      });
+      if (isCancel(response)) return null;
+      return typeof response === "string" ? response : "";
     });
-    if (isCancel(response)) return null;
-    return typeof response === "string" ? response : "";
+  }
+
+  public static async askSelectWithDelete(
+    message: string,
+    options: PromptOption[],
+    config: {
+      initialSelectedValue?: string;
+      suppressCloseRenderOnDelete?: boolean;
+    } = {},
+  ): Promise<SelectWithDeleteResult> {
+    if (this.tuiInstance && this.tuiInstance.isActive) {
+      const response = await this.tuiInstance.showPrompt({
+        type: "select",
+        message,
+        options,
+        deletable: true,
+        initialSelectedValue: config.initialSelectedValue,
+        suppressCloseRenderOnDelete: config.suppressCloseRenderOnDelete,
+      });
+      if (response && typeof response === "object" && "action" in response) {
+        return response as SelectWithDeleteResult;
+      }
+      if (typeof response === "string" && response.length > 0) {
+        return { action: "select", value: response };
+      }
+      return { action: "cancel" };
+    }
+
+    const response = await this.askSelect(message, options);
+    if (!response) {
+      return { action: "cancel" };
+    }
+    return { action: "select", value: response };
   }
 
   public static async askMultiSelect(
     message: string,
-    options: { value: string; label: string; hint?: string }[],
+    options: PromptOption[],
   ): Promise<string[] | null> {
-    const response = await multiselect({
-      message,
-      options,
-      required: false,
+    if (this.tuiInstance && this.tuiInstance.isActive) {
+      return this.tuiInstance.showPrompt({
+        type: "multiselect",
+        message,
+        options,
+      });
+    }
+    return this.wrapPrompt(async () => {
+      const response = await multiselect({
+        message,
+        options,
+        required: false,
+      });
+      if (isCancel(response)) return null;
+      return Array.isArray(response) ? (response as string[]) : [];
     });
-    if (isCancel(response)) return null;
-    return Array.isArray(response) ? (response as string[]) : [];
   }
 
   public static makeSpinner() {

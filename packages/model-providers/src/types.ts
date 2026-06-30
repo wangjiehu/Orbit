@@ -40,6 +40,21 @@ export interface ModelCapabilities {
   maxOutputTokens?: number;
 }
 
+export interface ProviderRuntimeOptions {
+  id?: string;
+  apiKeyEnv?: string;
+  apiKeyHeader?: string;
+  apiKeyPrefix?: string;
+  headers?: Record<string, string>;
+  requestTimeoutMs?: number;
+  streamTimeoutMs?: number;
+  maxRetries?: number;
+  disablePreheat?: boolean;
+  extraBody?: Record<string, unknown>;
+  capabilities?: Partial<ModelCapabilities>;
+  modelCapabilities?: Record<string, Partial<ModelCapabilities>>;
+}
+
 export interface OrbitToolDefinition {
   name: string;
   description: string;

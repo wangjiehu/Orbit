@@ -32,11 +32,18 @@ export const DEFAULT_CONFIG: OrbitConfig = {
       type: "openai",
       baseUrl: "https://api.openai.com/v1",
       apiKeyEnv: "OPENAI_API_KEY",
+      models: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"],
     },
     anthropic: {
       type: "anthropic",
       baseUrl: "https://api.anthropic.com",
       apiKeyEnv: "ANTHROPIC_API_KEY",
+      models: [
+        "claude-fable-5",
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+      ],
     },
     ollama: {
       type: "ollama",
@@ -90,17 +97,33 @@ export const DEFAULT_CONFIG: OrbitConfig = {
     autoRepair: false,
     testCommands: [],
   },
+  agent: {
+    maxIterations: 8,
+  },
   tools: {
     bash: {
       enabled: true,
       timeoutMs: 120000,
     },
     webSearch: {
-      enabled: false,
+      enabled: true,
+      provider: "auto",
+      searxngUrls: [],
+      tavilyApiKeyEnv: "TAVILY_API_KEY",
+      tavilyBaseUrl: "https://api.tavily.com/search",
+      timeoutMs: 8000,
+      maxResults: 8,
     },
     mcp: {
       enabled: false,
     },
+  },
+  skills: {
+    enabled: true,
+    directories: [".orbit/skills", ".agents/skills"],
+    activation: "auto",
+    maxActive: 3,
+    maxSkillBytes: 24000,
   },
   mcpServers: {},
   hooks: {},

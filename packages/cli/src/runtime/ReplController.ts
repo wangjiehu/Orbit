@@ -33,7 +33,7 @@ export class ReplController {
     private providerInstance: any,
     private interaction: UserInteraction,
     private multi?: boolean,
-    private direct?: boolean
+    private direct?: boolean,
   ) {}
 
   private getLocalState(): LocalState {
@@ -82,7 +82,11 @@ export class ReplController {
             const parsed = JSON.parse(body);
             const prefix = parsed.prefix || "";
             const suffix = parsed.suffix || "";
-            const completion = await engine.autocomplete(prefix, suffix, this.config);
+            const completion = await engine.autocomplete(
+              prefix,
+              suffix,
+              this.config,
+            );
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ completion }));
           } catch (e: any) {
@@ -126,12 +130,30 @@ export class ReplController {
       ? this.startAutocompleteServer()
       : null;
 
-    const tui = new FullscreenTui(this.cwd, this.config.models.default, version, this.config);
+    const tui = new FullscreenTui(
+      this.cwd,
+      this.config.models.default,
+      version,
+      this.config,
+    );
     this.currentTui = tui;
     tui.setPermissionsMode(this.config.permissions.mode);
+    if (useFullscreenTui) {
+      Prompt.setTuiInstance(tui);
+    }
 
     const tuiInteraction: UserInteraction = {
-      askApproval: async (reason: string, preview?: string): Promise<boolean> => {
+      askApproval: async (
+        reason: string,
+        preview?: string,
+      ): Promise<boolean> => {
+        if (useFullscreenTui && tui.isActive) {
+          const message = preview
+            ? `Risk Warning: ${reason}\nParameters: ${preview}\nConfirm action?`
+            : `Risk Warning: ${reason}\nConfirm action?`;
+          return await Prompt.askApproval(message);
+        }
+
         const wasActive = useFullscreenTui && tui.isActive;
         if (wasActive) tui.stop();
 
@@ -263,8 +285,9 @@ export class ReplController {
     const ignoreRegexes = ignorePatterns.map((pattern: string) => {
       const escaped = pattern
         .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-        .replace(/\*\*/g, ".*")
-        .replace(/\*/g, "[^/]*");
+        .replace(/\*\*/g, "__DOUBLE_STAR__")
+        .replace(/\*/g, "[^/]*")
+        .replace(/__DOUBLE_STAR__\/?/g, "(?:|.*/)");
       const finalPattern = escaped.endsWith(".*")
         ? "^" + escaped + "$"
         : "(^" + escaped + "$|^" + escaped + "\/.*)";
@@ -281,30 +304,38 @@ export class ReplController {
 
     if (!isHomeOrRoot) {
       const indexer = new SymbolIndexer(this.cwd);
-      this.watcher = watch(this.cwd, { recursive: true }, (eventType, filename) => {
-        if (
-          filename &&
-          /\.(ts|tsx|js|jsx)$/.test(filename) &&
-          !filename.includes(".orbit")
-        ) {
-          const normalized = filename.replace(/\\/g, "/");
-          const isIgnored = ignoreRegexes.some((rx: RegExp) =>
-            rx.test(normalized),
-          );
-          if (isIgnored) return;
+      this.watcher = watch(
+        this.cwd,
+        { recursive: true },
+        (eventType, filename) => {
+          if (
+            filename &&
+            /\.(ts|tsx|js|jsx)$/.test(filename) &&
+            !filename.includes(".orbit")
+          ) {
+            const normalized = filename.replace(/\\/g, "/");
+            const isIgnored = ignoreRegexes.some((rx: RegExp) =>
+              rx.test(normalized),
+            );
+            if (isIgnored) return;
 
-          if (this.watchTimeout) clearTimeout(this.watchTimeout);
-          this.watchTimeout = setTimeout(() => {
-            indexer.index().catch(() => {});
-          }, 500); // debounce 500ms
-        }
-      });
+            if (this.watchTimeout) clearTimeout(this.watchTimeout);
+            this.watchTimeout = setTimeout(() => {
+              indexer.index().catch(() => {});
+            }, 500); // debounce 500ms
+          }
+        },
+      );
     }
 
     if (useFullscreenTui) {
       tui.start(this.config.budgetLimit);
     } else {
-      Renderer.printHeader(loop.getSessionId(), this.config.models.default, this.cwd);
+      Renderer.printHeader(
+        loop.getSessionId(),
+        this.config.models.default,
+        this.cwd,
+      );
     }
 
     const commandRouter = new CommandRouter(
@@ -325,7 +356,7 @@ export class ReplController {
       this.getLocalState.bind(this),
       this.saveLocalState.bind(this),
       tuiInteraction,
-      this.multi
+      this.multi,
     );
 
     try {
@@ -381,7 +412,8 @@ export class ReplController {
           activeSession &&
           (activeSession.title === "New Orbit Session" || !activeSession.title)
         ) {
-          const fastModel = this.config.models.fast || this.config.models.default;
+          const fastModel =
+            this.config.models.fast || this.config.models.default;
           const firstPrompt = trimmed;
           Promise.resolve().then(async () => {
             try {
@@ -527,6 +559,9 @@ export class ReplController {
       eventBus.off("cost_update", onCostUpdate);
       eventBus.off("cache_update", onCacheUpdate);
       eventBus.off("thinking_delta", onThinkingDelta);
+      if (useFullscreenTui) {
+        Prompt.setTuiInstance(null);
+      }
       tui.dispose();
       this.autocompleteServer?.close();
     }
@@ -538,7 +573,9 @@ export class ReplController {
       if (!candidates) return [[], ""];
 
       if (line.startsWith("/")) {
-        const hits = candidates.commands.filter((c: string) => c.startsWith(line));
+        const hits = candidates.commands.filter((c: string) =>
+          c.startsWith(line),
+        );
         return [hits.length ? hits : candidates.commands, line];
       }
 
@@ -549,8 +586,12 @@ export class ReplController {
         return [[], lastWord];
       }
 
-      const fileHits = candidates.files.filter((f: string) => f.startsWith(lastWord));
-      const symbolHits = candidates.symbols.filter((s: string) => s.startsWith(lastWord));
+      const fileHits = candidates.files.filter((f: string) =>
+        f.startsWith(lastWord),
+      );
+      const symbolHits = candidates.symbols.filter((s: string) =>
+        s.startsWith(lastWord),
+      );
       const allHits = [...fileHits, ...symbolHits];
 
       return [allHits, lastWord];

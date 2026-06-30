@@ -1,14 +1,21 @@
 import { AgentLoop, UserInteraction } from "@orbit-build/core";
 import { FullscreenTui } from "../tui/FullscreenTui.js";
 import { ConfigSchema } from "@orbit-build/config";
-import { Prompt } from "@orbit-build/tui";
+import { Prompt, type PromptOption } from "@orbit-build/tui";
 import picocolors from "picocolors";
 import glob from "fast-glob";
-import { existsSync, readFileSync, readdirSync, unlinkSync } from "fs";
-import { join, dirname, resolve } from "path";
+import { existsSync, readFileSync, readdirSync, rmSync } from "fs";
+import { join, dirname, resolve, relative, isAbsolute } from "path";
 import { homedir } from "os";
 import { PermissionEngine } from "@orbit-build/permissions";
-import { expandCustomCommand, loadCustomCommands } from "../commands/customCommands.js";
+import {
+  expandCustomCommand,
+  loadCustomCommands,
+} from "../commands/customCommands.js";
+import {
+  formatModelOptionLabel,
+  getProviderModelCandidates,
+} from "./ModelCatalog.js";
 import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
@@ -46,7 +53,7 @@ export class CommandRouter {
     private getLocalState: () => any,
     private saveLocalState: (state: any) => void,
     private tuiInteraction: UserInteraction,
-    private multi?: boolean
+    private multi?: boolean,
   ) {}
 
   private printOutput(text: string, raw = false) {
@@ -57,7 +64,9 @@ export class CommandRouter {
     }
   }
 
-  public async route(input: string): Promise<{ shouldExit: boolean; processed: boolean }> {
+  public async route(
+    input: string,
+  ): Promise<{ shouldExit: boolean; processed: boolean }> {
     let trimmed = input.trim();
     if (!trimmed) return { shouldExit: false, processed: false };
 
@@ -211,76 +220,63 @@ export class CommandRouter {
 
         if (isZh) {
           helpText = [
+            picocolors.bold(picocolors.yellow("[ 上下文管理 (Context) ]")),
+            `  ${picocolors.green("/add")}   ${picocolors.cyan("<file>")}     - 添加文件/目录至上下文 (使用 -r 设为只读)`,
+            `  ${picocolors.green("/drop")}  ${picocolors.cyan("<file>")}     - 从活动上下文中移除指定文件或通配符`,
+            `  ${picocolors.green("/clear")}            - 重置对话历史与屏幕缓存`,
             "",
-            picocolors.bold(picocolors.cyan("● Orbit 交互式终端指令指南")),
+            picocolors.bold(picocolors.yellow("[ 会话与历史 (Session) ]")),
+            `  ${picocolors.green("/chat")}   ${picocolors.cyan("[action]")}   - 管理对话会话 (list/ls, new, delete/rm, switch)`,
+            `  ${picocolors.green("/rollback")}         - 回滚最近的文件修改检查点`,
+            `  ${picocolors.green("/copy")}             - 拷贝 AI 的最新回复至系统剪贴板`,
             "",
-            picocolors.bold(picocolors.yellow("  [ 上下文管理 (Context) ]")),
-            `    ${picocolors.green("/add")}   ${picocolors.cyan("<file>")}     - 添加文件/目录至当前上下文 (使用 -r 设为只读)`,
-            `    ${picocolors.green("/drop")}  ${picocolors.cyan("<file>")}     - 从活动上下文中移除指定文件或通配符模式`,
-            `    ${picocolors.green("/clear")}            - 清空终端屏幕和滚动缓冲`,
+            picocolors.bold(picocolors.yellow("[ 配置与状态 (Settings) ]")),
+            `  ${picocolors.green("/status")}           - 诊断并展示当前会话、模型与消耗`,
+            `  ${picocolors.green("/config")}   ${picocolors.cyan("[k=v]")}    - 查看或直接修改配置参数`,
+            `  ${picocolors.green("/model")}    ${picocolors.cyan("[name]")}   - 动态查询或切换正在使用的语言大模型`,
+            `  ${picocolors.green("/mode")}     ${picocolors.cyan("[mode]")}   - 切换安全确认模式 (strict, normal, auto, plan)`,
+            `  ${picocolors.green("/update")}           - 检测并更新项目依赖包`,
             "",
-            picocolors.bold(picocolors.yellow("  [ 会话与历史 (Session) ]")),
-            `    ${picocolors.green("/chat")}   ${picocolors.cyan("[action]")}   - 管理对话会话 (子命令: list/ls, new, delete/rm, switch)`,
-            `    ${picocolors.green("/rollback")}         - 回滚最近的文件修改检查点`,
-            `    ${picocolors.green("/copy")}             - 拷贝 AI 的最新回复至系统剪贴板`,
+            picocolors.bold(picocolors.yellow("[ Git 提交 (Git) ]")),
+            `  ${picocolors.green("/commit")}   ${picocolors.cyan("[msg]")}    - 暂存工作区修改并生成提交`,
             "",
-            picocolors.bold(picocolors.yellow("  [ 配置与状态 (Settings) ]")),
-            `    ${picocolors.green("/status")}           - 诊断并展示当前会话、模型、Token 消耗和限额`,
-            `    ${picocolors.green("/config")}   ${picocolors.cyan("[k=v]")}    - 查看或交互式/直接修改配置参数`,
-            `    ${picocolors.green("/model")}    ${picocolors.cyan("[name]")}   - 动态查询或切换正在使用的 AI 语言大模型`,
-            `    ${picocolors.green("/mode")}     ${picocolors.cyan("[mode]")}   - 切换安全确认模式 (strict, normal, auto, plan)`,
-            `    ${picocolors.green("/update")}           - 检测并更新项目依赖包 (如 npm install)`,
-            "",
-            picocolors.bold(picocolors.yellow("  [ Git 提交 (Git) ]")),
-            `    ${picocolors.green("/commit")}   ${picocolors.cyan("[msg]")}    - 暂存工作区修改并生成提交 (空消息时使用 LLM 自动生成)`,
-            "",
-            picocolors.bold(picocolors.yellow("  [ 系统控制 (System) ]")),
-            `    ${picocolors.green("/help")}             - 显示此帮助信息`,
-            `    ${picocolors.green("/exit")} / ${picocolors.green("/quit")}     - 安全退出交互式终端`,
-            "",
-            picocolors.bold(picocolors.cyan("  [ 系统控制 (System) ]")),
-            `    ${picocolors.green("!<cmd>")} / ${picocolors.green("/run")} ${picocolors.cyan("<cmd>")} - 直接执行系统原生 Shell 命令 (例如: !git diff)`,
-            "",
+            picocolors.bold(picocolors.yellow("[ 系统控制 (System) ]")),
+            `  ${picocolors.green("/help")}             - 显示此帮助信息`,
+            `  ${picocolors.green("/exit")} / ${picocolors.green("/quit")}     - 安全退出交互式终端`,
+            `  ${picocolors.green("!<cmd>")} / ${picocolors.green("/run")} ${picocolors.cyan("<cmd>")} - 直接执行系统原生 Shell 命令`,
           ].join("\n");
         } else {
           helpText = [
+            picocolors.bold(picocolors.yellow("[ Context Management ]")),
+            `  ${picocolors.green("/add")}   ${picocolors.cyan("<file>")}     - Add file/directory to context (use -r for read-only)`,
+            `  ${picocolors.green("/drop")}  ${picocolors.cyan("<file>")}     - Drop file/pattern from active context`,
+            `  ${picocolors.green("/clear")}            - Reset dialogue history and clear TUI screen`,
             "",
-            picocolors.bold(picocolors.cyan("● Orbit Interactive Shell Commands Guide")),
+            picocolors.bold(picocolors.yellow("[ Session & History ]")),
+            `  ${picocolors.green("/chat")}   ${picocolors.cyan("[action]")}   - Manage sessions (list/ls, new, delete/rm, switch)`,
+            `  ${picocolors.green("/rollback")}         - Rollback to last file modification checkpoint`,
+            `  ${picocolors.green("/copy")}             - Copy last AI message to clipboard`,
             "",
-            picocolors.bold(picocolors.yellow("  [ Context Management ]")),
-            `    ${picocolors.green("/add")}   ${picocolors.cyan("<file>")}     - Add files/dirs to prompt context (use -r for read-only)`,
-            `    ${picocolors.green("/drop")}  ${picocolors.cyan("<file>")}     - Remove files/patterns from active prompt context`,
-            `    ${picocolors.green("/clear")}            - Clear the terminal screen and scrollback buffer`,
+            picocolors.bold(picocolors.yellow("[ Configuration & Status ]")),
+            `  ${picocolors.green("/status")}           - Show current session, model, and cost`,
+            `  ${picocolors.green("/config")}   ${picocolors.cyan("[k=v]")}    - View or modify configurations`,
+            `  ${picocolors.green("/model")}    ${picocolors.cyan("[name]")}   - Show or switch active model`,
+            `  ${picocolors.green("/mode")}     ${picocolors.cyan("[mode]")}   - Switch permission mode (strict, normal, auto, plan)`,
+            `  ${picocolors.green("/update")}           - Check and update dependencies`,
             "",
-            picocolors.bold(picocolors.yellow("  [ Session & History ]")),
-            `    ${picocolors.green("/chat")}   ${picocolors.cyan("[action]")}   - Manage sessions (subcommands: list/ls, new, delete/rm, switch)`,
-            `    ${picocolors.green("/rollback")}         - Revert the last file edits checkpoint`,
-            `    ${picocolors.green("/copy")}             - Copy last assistant response to system clipboard`,
+            picocolors.bold(picocolors.yellow("[ Git Version Control ]")),
+            `  ${picocolors.green("/commit")}   ${picocolors.cyan("[msg]")}    - Stage files and commit with auto-generated message`,
             "",
-            picocolors.bold(picocolors.yellow("  [ Configuration & Status ]")),
-            `    ${picocolors.green("/status")}           - Display active session info, token usage, and budget limits`,
-            `    ${picocolors.green("/config")}   ${picocolors.cyan("[k=v]")}    - View or modify configurations interactively or via key=value`,
-            `    ${picocolors.green("/model")}    ${picocolors.cyan("[name]")}   - Query or dynamically swap the active AI model`,
-            `    ${picocolors.green("/mode")}     ${picocolors.cyan("[mode]")}   - Switch permission safety mode (strict, normal, auto, plan)`,
-            `    ${picocolors.green("/update")}           - Detect and update project dependencies (npm/pnpm/yarn install)`,
-            "",
-            picocolors.bold(picocolors.yellow("  [ Git Operations ]")),
-            `    ${picocolors.green("/commit")}   ${picocolors.cyan("[msg]")}    - Stage all changes and commit (generates message via LLM if empty)`,
-            "",
-            picocolors.bold(picocolors.yellow("  [ System Commands ]")),
-            `    ${picocolors.green("/help")}             - Show this commands guide`,
-            `    ${picocolors.green("/exit")} / ${picocolors.green("/quit")}     - Terminate the interactive session`,
-            "",
-            picocolors.bold(picocolors.cyan("  [ Direct Shell Execution ]")),
-            `    ${picocolors.green("!<cmd>")} / ${picocolors.green("/run")} ${picocolors.cyan("<cmd>")} - Run a raw shell command directly on the host machine (e.g. !git status)`,
-            "",
+            picocolors.bold(picocolors.yellow("[ System Control ]")),
+            `  ${picocolors.green("/help")}             - Show this help screen`,
+            `  ${picocolors.green("/exit")} / ${picocolors.green("/quit")}     - Exit interactive shell`,
+            `  ${picocolors.green("!<cmd>")} / ${picocolors.green("/run")} ${picocolors.cyan("<cmd>")} - Execute native shell command`,
           ].join("\n");
         }
+
         this.printOutput(helpText);
         return { shouldExit: false, processed: true };
       }
-
-
 
       if (command === "/rollback") {
         const isZh = config.language === "zh";
@@ -291,7 +287,7 @@ export class CommandRouter {
           return { shouldExit: false, processed: true };
         }
 
-        const { execSync } = await import("child_process");
+        const { execFileSync, execSync } = await import("child_process");
         let statusOut = "";
         try {
           statusOut = execSync("git status --porcelain", {
@@ -310,9 +306,7 @@ export class CommandRouter {
         if (lines.length === 0) {
           console.log(
             isZh
-              ? picocolors.yellow(
-                  "当前工作区没有检测到任何未提交的代码变更。",
-                )
+              ? picocolors.yellow("当前工作区没有检测到任何未提交的代码变更。")
               : picocolors.yellow(
                   "No uncommitted changes detected in the workspace.",
                 ),
@@ -332,7 +326,7 @@ export class CommandRouter {
           return filepath;
         });
 
-        const wasActive = useFullscreenTui && tui.isActive;
+        const wasActive = false;
         if (wasActive) tui.stop();
 
         try {
@@ -358,21 +352,21 @@ export class CommandRouter {
               await loop.rollbackLastCheckpoint();
             } else {
               for (const file of selected) {
-                const rolledBack = (loop as any).rollbackFileToCheckpoint(
-                  file,
-                );
+                const rolledBack = (loop as any).rollbackFileToCheckpoint(file);
                 if (!rolledBack) {
                   try {
-                    execSync(`git checkout -- "${file}"`, {
+                    execFileSync("git", ["checkout", "--", file], {
                       cwd,
                       stdio: "ignore",
                     });
                   } catch {
                     try {
                       const fullP = resolve(cwd, file);
-                      // Use the statically-imported unlinkSync (avoids fire-and-forget async import)
-                      if (existsSync(fullP)) {
-                        unlinkSync(fullP);
+                      const rel = relative(cwd, fullP);
+                      const staysInWorkspace =
+                        rel && !rel.startsWith("..") && !isAbsolute(rel);
+                      if (existsSync(fullP) && staysInWorkspace) {
+                        rmSync(fullP, { recursive: true, force: true });
                       }
                     } catch {}
                   }
@@ -417,8 +411,12 @@ export class CommandRouter {
         if (!existsSync(packageJsonPath)) {
           console.log(
             isZh
-              ? picocolors.yellow("当前工作区没有检测到 package.json，不支持 npm 更新。")
-              : picocolors.yellow("No package.json found in the workspace. npm update not supported."),
+              ? picocolors.yellow(
+                  "当前工作区没有检测到 package.json，不支持 npm 更新。",
+                )
+              : picocolors.yellow(
+                  "No package.json found in the workspace. npm update not supported.",
+                ),
           );
           return { shouldExit: false, processed: true };
         }
@@ -446,7 +444,9 @@ export class CommandRouter {
             console.log(picocolors.cyan(`\n● Running "${installCmd}"...`));
             const { execSync } = await import("child_process");
             execSync(installCmd, { cwd, stdio: "inherit" });
-            console.log(picocolors.green(`✔ Dependencies updated successfully.\n`));
+            console.log(
+              picocolors.green(`✔ Dependencies updated successfully.\n`),
+            );
 
             // Force clear TUI's cached npm check status so the heart turns red immediately
             (tui as any).npmNeedsUpdate = false;
@@ -464,22 +464,55 @@ export class CommandRouter {
       }
 
       if (command === "/status") {
+        const isZh = config.language === "zh";
         const activeConfig = loop.getConfig();
-        const activeModel = loop.getModelOverride() || activeConfig.models.default;
+        const activeModel =
+          loop.getModelOverride() || activeConfig.models.default;
         const budgetLimit = activeConfig.budgetLimit;
         const currentCost = loop.getSessionCost();
         const mode = activeConfig.permissions.mode;
+        const costPct =
+          budgetLimit > 0
+            ? Math.min(100, (currentCost / budgetLimit) * 100).toFixed(1)
+            : "N/A";
+        const barLen = 24;
+        const filledLen =
+          budgetLimit > 0
+            ? Math.round((currentCost / budgetLimit) * barLen)
+            : 0;
+        const bar =
+          picocolors.green("█".repeat(filledLen)) +
+          picocolors.gray("░".repeat(Math.max(0, barLen - filledLen)));
 
-        const statusText = [
-          picocolors.bold(picocolors.cyan("\n=== Orbit Session Status ===")),
-          `  🆔 Session ID:   ${picocolors.green(loop.getSessionId())}`,
-          `  🔌 Provider:     ${picocolors.green(this.providerInstance.id)} (${this.providerInstance.baseUrl || "Default URL"})`,
-          `  🤖 Active Model:  ${picocolors.green(activeModel)}`,
-          `  💰 Session Cost: $${currentCost.toFixed(4)} / $${budgetLimit.toFixed(2)} (Limit)`,
-          `  🛡️ Security Mode: ${picocolors.green(mode.toUpperCase())}`,
-          picocolors.cyan("============================\n"),
-        ].join("\n");
-        this.printOutput(statusText);
+        const statusLines = isZh
+          ? [
+              picocolors.bold("会话概况"),
+              "",
+              `  🆔  ${picocolors.gray("Session ID")}    ${picocolors.cyan(loop.getSessionId())}`,
+              `  🔌  ${picocolors.gray("Provider")}      ${picocolors.cyan(this.providerInstance.id)}`,
+              `  🤖  ${picocolors.gray("Active Model")}  ${picocolors.cyan(activeModel)}`,
+              `  🛡️  ${picocolors.gray("Security Mode")} ${picocolors.green(mode.toUpperCase())}`,
+              "",
+              picocolors.bold("费用与预算"),
+              "",
+              `  💰  $${picocolors.yellow(currentCost.toFixed(4))} / $${picocolors.gray(budgetLimit.toFixed(2))}  (${costPct}%)`,
+              `       ${bar}`,
+            ]
+          : [
+              picocolors.bold("Session Overview"),
+              "",
+              `  🆔  ${picocolors.gray("Session ID")}    ${picocolors.cyan(loop.getSessionId())}`,
+              `  🔌  ${picocolors.gray("Provider")}      ${picocolors.cyan(this.providerInstance.id)}`,
+              `  🤖  ${picocolors.gray("Active Model")}  ${picocolors.cyan(activeModel)}`,
+              `  🛡️  ${picocolors.gray("Security Mode")} ${picocolors.green(mode.toUpperCase())}`,
+              "",
+              picocolors.bold("Budget & Cost"),
+              "",
+              `  💰  $${picocolors.yellow(currentCost.toFixed(4))} / $${picocolors.gray(budgetLimit.toFixed(2))}  (${costPct}%)`,
+              `       ${bar}`,
+            ];
+
+        this.printOutput(statusLines.join("\n"));
         return { shouldExit: false, processed: true };
       }
 
@@ -526,9 +559,7 @@ export class CommandRouter {
             const num = Number(rawVal);
             if (isNaN(num)) {
               this.printOutput(
-                picocolors.red(
-                  `Error: Key "${key}" expects a numeric value.`,
-                ),
+                picocolors.red(`Error: Key "${key}" expects a numeric value.`),
               );
               return { shouldExit: false, processed: true };
             }
@@ -560,7 +591,7 @@ export class CommandRouter {
           return { shouldExit: false, processed: true };
         }
 
-        const wasActive = useFullscreenTui && tui.isActive;
+        const wasActive = false;
         if (wasActive) tui.stop();
         try {
           while (true) {
@@ -577,6 +608,13 @@ export class CommandRouter {
               activeConfig.permissions.protectSecrets;
             const currentBashEnabled = activeConfig.tools.bash.enabled;
             const currentSearchEnabled = activeConfig.tools.webSearch.enabled;
+            const currentSearchProvider = activeConfig.tools.webSearch.provider;
+            const currentSearchUrls = activeConfig.tools.webSearch.searxngUrls;
+            const currentSearchTimeout = activeConfig.tools.webSearch.timeoutMs;
+            const currentSearchMaxResults =
+              activeConfig.tools.webSearch.maxResults;
+            const currentAgentMaxIterations =
+              (activeConfig as any).agent?.maxIterations || 8;
             const currentMcpEnabled = activeConfig.tools.mcp.enabled;
             const currentEditor = activeConfig.editor;
             const currentAutoCommit = activeConfig.autoCommit;
@@ -622,6 +660,26 @@ export class CommandRouter {
                 {
                   value: "tools.webSearch.enabled",
                   label: `🌐 tools.webSearch.enabled (current: ${currentSearchEnabled})`,
+                },
+                {
+                  value: "tools.webSearch.provider",
+                  label: `🔎 tools.webSearch.provider (current: ${currentSearchProvider})`,
+                },
+                {
+                  value: "tools.webSearch.searxngUrls",
+                  label: `🧭 tools.webSearch.searxngUrls (current: ${currentSearchUrls.join(", ") || "auto/env/local"})`,
+                },
+                {
+                  value: "tools.webSearch.timeoutMs",
+                  label: `⏱️  tools.webSearch.timeoutMs (current: ${currentSearchTimeout})`,
+                },
+                {
+                  value: "tools.webSearch.maxResults",
+                  label: `📚 tools.webSearch.maxResults (current: ${currentSearchMaxResults})`,
+                },
+                {
+                  value: "agent.maxIterations",
+                  label: `🔁 agent.maxIterations (current: ${currentAgentMaxIterations})`,
                 },
                 {
                   value: "tools.mcp.enabled",
@@ -716,9 +774,53 @@ export class CommandRouter {
                   );
                 }
               }
-            } else if (choice === "budgetLimit") {
+            } else if (choice === "tools.webSearch.provider") {
+              const nextVal = await Prompt.askSelect(
+                "Set tools.webSearch.provider to:",
+                [
+                  {
+                    value: "auto",
+                    label:
+                      "auto (SearXNG/Tavily first, Bing/DuckDuckGo fallback)",
+                  },
+                  {
+                    value: "searxng",
+                    label: "searxng (configured/self-hosted JSON endpoint)",
+                  },
+                  {
+                    value: "tavily",
+                    label: "tavily (requires TAVILY_API_KEY)",
+                  },
+                  {
+                    value: "bing",
+                    label: "bing (no-key HTML fallback, broadly reachable)",
+                  },
+                  {
+                    value: "duckduckgo",
+                    label: "duckduckgo (no-key HTML fallback)",
+                  },
+                ],
+              );
+              if (nextVal !== null && nextVal !== "") {
+                const testConfig = JSON.parse(JSON.stringify(activeConfig));
+                this.setNestedProperty(testConfig, choice, nextVal);
+                const parseResult = ConfigSchema.safeParse(testConfig);
+                if (parseResult.success) {
+                  this.setNestedProperty(activeConfig, choice, nextVal);
+                  console.log(
+                    picocolors.green(`✔ Updated "${choice}" to: ${nextVal}`),
+                  );
+                } else {
+                  console.log(
+                    picocolors.red(
+                      `Validation error: ${parseResult.error.message}`,
+                    ),
+                  );
+                }
+              }
+            } else if (typeof currentVal === "number") {
               const nextValStr = await Prompt.askText(
-                `Enter new budget limit (number):`,
+                `Enter numeric value for ${choice}:`,
                 String(currentVal),
               );
               if (nextValStr !== null && nextValStr !== "") {
@@ -790,9 +892,7 @@ export class CommandRouter {
                 if (parseResult.success) {
                   this.setNestedProperty(activeConfig, choice, nextValStr);
                   console.log(
-                    picocolors.green(
-                      `✔ Updated "${choice}" to: ${nextValStr}`,
-                    ),
+                    picocolors.green(`✔ Updated "${choice}" to: ${nextValStr}`),
                   );
                 } else {
                   console.log(
@@ -816,98 +916,19 @@ export class CommandRouter {
         const modelArg = parts.slice(1).join(" ").trim();
         const activeConfig = loop.getConfig();
         if (!modelArg) {
-          const wasActive = useFullscreenTui && tui.isActive;
+          const wasActive = false;
           if (wasActive) tui.stop();
           try {
             const activeModel =
               loop.getModelOverride() || activeConfig.models.default;
-            let modelOptions: Array<{ value: string; label: string }> = [];
             const providerId = this.providerInstance.id;
-
-            if (providerId === "anthropic") {
-              modelOptions = [
-                {
-                  value: "claude-3-5-sonnet-latest",
-                  label:
-                    "claude-3-5-sonnet-latest (Claude 3.5 Sonnet - Recommended)",
-                },
-                {
-                  value: "claude-3-5-haiku-latest",
-                  label: "claude-3-5-haiku-latest (Claude 3.5 Haiku)",
-                },
-                {
-                  value: "claude-3-opus-latest",
-                  label: "claude-3-opus-latest (Claude 3 Opus)",
-                },
-              ];
-            } else if (providerId === "openai") {
-              modelOptions = [
-                { value: "gpt-4o", label: "gpt-4o (GPT-4o - Recommended)" },
-                { value: "gpt-4o-mini", label: "gpt-4o-mini (GPT-4o mini)" },
-                { value: "o1", label: "o1 (o1 Reasoner)" },
-                {
-                  value: "o3-mini",
-                  label: "o3-mini (o3-mini Fast Reasoner)",
-                },
-              ];
-            } else if (
-              providerId === "deepseek-openai" ||
-              providerId === "deepseek-anthropic"
-            ) {
-              modelOptions = [
-                {
-                  value: "deepseek-v4-flash",
-                  label:
-                    "deepseek-v4-flash (DeepSeek-V4 / Fast & Flash - Recommended)",
-                },
-                {
-                  value: "deepseek-v4-pro",
-                  label: "deepseek-v4-pro (DeepSeek-V4 / Advanced & Pro)",
-                },
-                {
-                  value: "deepseek-ai/DeepSeek-V4-Flash-DSpark",
-                  label:
-                    "deepseek-ai/DeepSeek-V4-Flash-DSpark (self-hosted DSpark Flash)",
-                },
-                {
-                  value: "deepseek-ai/DeepSeek-V4-Pro-DSpark",
-                  label:
-                    "deepseek-ai/DeepSeek-V4-Pro-DSpark (self-hosted DSpark Pro)",
-                },
-              ];
-            } else if (providerId === "ollama") {
-              modelOptions = [
-                { value: "qwen2.5-coder:7b", label: "qwen2.5-coder:7b" },
-                { value: "qwen2.5-coder:1.5b", label: "qwen2.5-coder:1.5b" },
-                { value: "llama3", label: "llama3" },
-              ];
-            } else {
-              modelOptions = [
-                {
-                  value: "deepseek-v4-flash",
-                  label: "deepseek-v4-flash (DeepSeek-V4 / Fast & Flash)",
-                },
-                {
-                  value: "deepseek-v4-pro",
-                  label: "deepseek-v4-pro (DeepSeek-V4 / Advanced & Pro)",
-                },
-                {
-                  value: "deepseek-ai/DeepSeek-V4-Flash-DSpark",
-                  label:
-                    "deepseek-ai/DeepSeek-V4-Flash-DSpark (OpenAI-compatible DSpark)",
-                },
-                {
-                  value: "deepseek-ai/DeepSeek-V4-Pro-DSpark",
-                  label:
-                    "deepseek-ai/DeepSeek-V4-Pro-DSpark (OpenAI-compatible DSpark)",
-                },
-                { value: "gpt-4o", label: "gpt-4o (GPT-4o)" },
-                {
-                  value: "claude-3-5-sonnet-latest",
-                  label: "claude-3-5-sonnet-latest (Claude 3.5 Sonnet)",
-                },
-              ];
-            }
+            const modelOptions: Array<{ value: string; label: string }> =
+              getProviderModelCandidates(activeConfig, providerId).map(
+                (model) => ({
+                  value: model,
+                  label: formatModelOptionLabel(model),
+                }),
+              );
 
             modelOptions.push({
               value: "custom",
@@ -986,7 +1007,7 @@ export class CommandRouter {
               return { shouldExit: false, processed: true };
             }
 
-            const wasActive = useFullscreenTui && tui.isActive;
+            const wasActive = false;
             if (wasActive) tui.stop();
 
             const autoStage = await Prompt.askApproval(
@@ -1071,8 +1092,6 @@ export class CommandRouter {
         return { shouldExit: false, processed: true };
       }
 
-
-
       if (command === "/add") {
         let fileArg = parts.slice(1).join(" ").trim();
         const isZh = config.language === "zh";
@@ -1085,7 +1104,9 @@ export class CommandRouter {
           fileArg.startsWith("-r ")
         ) {
           readOnly = true;
-          fileArg = fileArg.replace(/^(--read-only|--readonly|-r)\s+/, "").trim();
+          fileArg = fileArg
+            .replace(/^(--read-only|--readonly|-r)\s+/, "")
+            .trim();
         } else if (
           fileArg === "--read-only" ||
           fileArg === "--readonly" ||
@@ -1096,7 +1117,7 @@ export class CommandRouter {
         }
 
         if (!fileArg) {
-          const wasActive = useFullscreenTui && tui.isActive;
+          const wasActive = false;
           if (wasActive) tui.stop();
 
           try {
@@ -1143,7 +1164,10 @@ export class CommandRouter {
                     : picocolors.yellow("No matching files found."),
                 );
               } else {
-                const options = filtered.map((f: string) => ({ value: f, label: f }));
+                const options = filtered.map((f: string) => ({
+                  value: f,
+                  label: f,
+                }));
                 const selected = await Prompt.askMultiSelect(
                   isZh
                     ? readOnly
@@ -1207,12 +1231,68 @@ export class CommandRouter {
           return { shouldExit: false, processed: true };
         }
 
-        const { isAbsolute, relative, resolve: pathResolve } = await import("path");
+        const {
+          isAbsolute,
+          relative,
+          resolve: pathResolve,
+        } = await import("path");
         const { statSync } = await import("fs");
-        const absPath = isAbsolute(fileArg) ? fileArg : pathResolve(cwd, fileArg);
+        const absPath = isAbsolute(fileArg)
+          ? fileArg
+          : pathResolve(cwd, fileArg);
         const relPath = relative(cwd, absPath).replace(/\\/g, "/");
 
         if (!existsSync(absPath)) {
+          if (fileArg.includes("*") || fileArg.includes("?")) {
+            const escaped = fileArg
+              .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+              .replace(/\*\*/g, "__DOUBLE_STAR__")
+              .replace(/\*/g, "[^/]*")
+              .replace(/__DOUBLE_STAR__\/?/g, "(?:|.*/)");
+            const rx = new RegExp("^" + escaped + "$", "i");
+            const matched = (candidates?.files || []).filter((f: string) =>
+              rx.test(f),
+            );
+            if (matched.length > 0) {
+              for (const f of matched) {
+                if (readOnly) {
+                  loop.addReadOnlyFilePublic(f, "Matched via glob /add");
+                } else {
+                  loop.addRelevantFilePublic(f, "Matched via glob /add");
+                }
+              }
+              console.log(
+                isZh
+                  ? readOnly
+                    ? picocolors.green(
+                        `✔ 已通过通配符自动添加 ${matched.length} 个只读文件到上下文。`,
+                      )
+                    : picocolors.green(
+                        `✔ 已通过通配符自动添加 ${matched.length} 个文件到上下文。`,
+                      )
+                  : readOnly
+                    ? picocolors.green(
+                        `✔ Automatically added ${matched.length} read-only file(s) via wildcard.`,
+                      )
+                    : picocolors.green(
+                        `✔ Automatically added ${matched.length} file(s) via wildcard.`,
+                      ),
+              );
+              tui.syncFromLoop(loop);
+            } else {
+              console.log(
+                isZh
+                  ? picocolors.yellow(
+                      `没有找到匹配通配符 "${fileArg}" 的文件。`,
+                    )
+                  : picocolors.yellow(
+                      `No files matching wildcard "${fileArg}" were found.`,
+                    ),
+              );
+            }
+            return { shouldExit: false, processed: true };
+          }
+
           const matched = (candidates?.files || []).filter(
             (f: string) =>
               f.toLowerCase().includes(fileArg.toLowerCase()) ||
@@ -1342,7 +1422,7 @@ export class CommandRouter {
         const fileArg = parts.slice(1).join(" ").trim();
         const isZh = config.language === "zh";
         if (!fileArg) {
-          const wasActive = useFullscreenTui && tui.isActive;
+          const wasActive = false;
           if (wasActive) tui.stop();
 
           try {
@@ -1411,8 +1491,14 @@ export class CommandRouter {
           return { shouldExit: false, processed: true };
         }
 
-        const { isAbsolute, relative, resolve: pathResolve } = await import("path");
-        const absPath = isAbsolute(fileArg) ? fileArg : pathResolve(cwd, fileArg);
+        const {
+          isAbsolute,
+          relative,
+          resolve: pathResolve,
+        } = await import("path");
+        const absPath = isAbsolute(fileArg)
+          ? fileArg
+          : pathResolve(cwd, fileArg);
         const relPath = relative(cwd, absPath).replace(/\\/g, "/");
 
         const beforeCount = loop.getRelevantFiles().length;
@@ -1420,9 +1506,12 @@ export class CommandRouter {
 
         // Glob/regex fallback for dropping files by pattern
         const activeFiles = loop.getRelevantFiles().map((f) => f.path);
-        const escaped = fileArg.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-        const globRegexStr = escaped.replace(/\*/g, ".*").replace(/\?/g, ".");
-        const rx = new RegExp("^" + globRegexStr + "$", "i");
+        const escaped = fileArg
+          .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+          .replace(/\*\*/g, "__DOUBLE_STAR__")
+          .replace(/\*/g, "[^/]*")
+          .replace(/__DOUBLE_STAR__\/?/g, "(?:|.*/)");
+        const rx = new RegExp("^" + escaped + "$", "i");
 
         for (const f of activeFiles) {
           if (rx.test(f) || f.startsWith(relPath)) {
@@ -1456,14 +1545,16 @@ export class CommandRouter {
       }
 
       if (command === "/clear") {
-        console.clear();
+        loop.clearHistoryPublic();
+        tui.loadHistory([]);
+        if (!useFullscreenTui) {
+          console.clear();
+        }
         return { shouldExit: false, processed: true };
       }
 
-
-
       if (command === "/chat") {
-        const wasActive = useFullscreenTui && tui.isActive;
+        const wasActive = false;
         let stoppedTui = false;
         const stopTuiIfNeeded = () => {
           if (wasActive && !stoppedTui) {
@@ -1482,17 +1573,23 @@ export class CommandRouter {
         try {
           const subCommand = parts[1]?.toLowerCase();
           const arg = parts.slice(2).join(" ").trim();
+          const isZh = config.language === "zh";
 
-          const sessions = loop.getSessions();
+          let sessions = loop.getSessions();
 
           // Function to delete session and adjust active session if needed
-          const handleDelete = (idToDelete: string) => {
+          const handleDelete = (
+            idToDelete: string,
+            options: { quiet?: boolean } = {},
+          ) => {
             loop.deleteSession(idToDelete);
-            restoreTuiAndPrint(
-              picocolors.green(
-                `✔ Session ${idToDelete} deleted successfully.`,
-              ),
-            );
+            if (!options.quiet) {
+              restoreTuiAndPrint(
+                picocolors.green(
+                  `✔ Session ${idToDelete} deleted successfully.`,
+                ),
+              );
+            }
 
             // If deleted the current session, switch to the most recent one remaining, or a new one
             const activeSession =
@@ -1504,16 +1601,19 @@ export class CommandRouter {
                 const targetSession = remaining[0];
                 const success = loop.resumeSession(targetSession.id);
                 if (success) {
-                  tui.loadHistory(loop.getHistory());
-                  restoreTuiAndPrint(
-                    picocolors.green(
-                      `✔ Automatically switched to session: ${targetSession.id}`,
-                    ),
-                  );
+                  tui.loadHistory(loop.getHistory(), {
+                    silent: options.quiet && useFullscreenTui,
+                  });
+                  if (!options.quiet) {
+                    restoreTuiAndPrint(
+                      picocolors.green(
+                        `✔ Automatically switched to session: ${targetSession.id}`,
+                      ),
+                    );
+                  }
                   this.saveLocalState({
                     lastSessionId: targetSession.id,
-                    lastModel:
-                      loop.getModelOverride() || config.models.default,
+                    lastModel: loop.getModelOverride() || config.models.default,
                   });
                 }
               } else {
@@ -1524,18 +1624,43 @@ export class CommandRouter {
                   this.providerInstance.id,
                   activeModel,
                 );
-                tui.loadHistory([]);
-                restoreTuiAndPrint(
-                  picocolors.green(
-                    `✔ Automatically started new session: ${newSessionId}`,
-                  ),
-                );
+                tui.loadHistory([], {
+                  silent: options.quiet && useFullscreenTui,
+                });
+                if (!options.quiet) {
+                  restoreTuiAndPrint(
+                    picocolors.green(
+                      `✔ Automatically started new session: ${newSessionId}`,
+                    ),
+                  );
+                }
                 this.saveLocalState({
                   lastSessionId: newSessionId,
                   lastModel: activeModel,
                 });
               }
             }
+          };
+
+          const getNextSelectionAfterDelete = (
+            sessionsBeforeDelete: any[],
+            deletedId: string,
+            emptyFallback?: string,
+          ): string | undefined => {
+            const deletedIndex = sessionsBeforeDelete.findIndex(
+              (session: any) => session.id === deletedId,
+            );
+            const remaining = sessionsBeforeDelete.filter(
+              (session: any) => session.id !== deletedId,
+            );
+            if (remaining.length === 0) {
+              return emptyFallback;
+            }
+            const nextIndex =
+              deletedIndex < 0
+                ? 0
+                : Math.min(deletedIndex, remaining.length - 1);
+            return remaining[nextIndex]?.id;
           };
 
           // CLI subcommand: /chat list / ls
@@ -1573,30 +1698,63 @@ export class CommandRouter {
           ) {
             let idToDelete = arg;
             if (!idToDelete) {
-              if (sessions.length === 0) {
-                restoreTuiAndPrint(
-                  picocolors.yellow(
-                    "No active or saved sessions found to delete.",
-                  ),
+              let deletePickerInitialSelectedValue: string | undefined;
+              while (true) {
+                sessions = loop.getSessions();
+                if (sessions.length === 0) {
+                  restoreTuiAndPrint(
+                    picocolors.yellow(
+                      "No active or saved sessions found to delete.",
+                    ),
+                  );
+                  return { shouldExit: false, processed: true };
+                }
+                const deleteOptions: PromptOption[] = sessions.map((s: any) => {
+                  const formattedDate = new Date(s.createdAt).toLocaleString();
+                  return {
+                    value: s.id,
+                    label: `${s.id} - ${s.title || "Untitled"} (${formattedDate}) [${s.model}]`,
+                  };
+                });
+                deleteOptions.push({
+                  value: "cancel",
+                  label: isZh ? "取消" : "Cancel",
+                  deleteDisabled: true,
+                });
+                stopTuiIfNeeded();
+                const deleteSelection = await Prompt.askSelectWithDelete(
+                  isZh
+                    ? "选择会话，按 Del 标记，再按 Del 确认删除；Esc 退出:"
+                    : "Choose a session, press Del once to mark and Del again to delete; Esc exits:",
+                  deleteOptions,
+                  {
+                    initialSelectedValue: deletePickerInitialSelectedValue,
+                    suppressCloseRenderOnDelete: useFullscreenTui,
+                  },
                 );
+                if (deleteSelection.action === "delete") {
+                  const sessionsBeforeDelete = sessions;
+                  idToDelete = deleteSelection.value;
+                  deletePickerInitialSelectedValue =
+                    getNextSelectionAfterDelete(
+                      sessionsBeforeDelete,
+                      idToDelete,
+                    );
+                  handleDelete(idToDelete, { quiet: useFullscreenTui });
+                  continue;
+                }
+                if (deleteSelection.action === "select") {
+                  restoreTuiAndPrint(
+                    picocolors.yellow(
+                      isZh
+                        ? "删除会话需要按 Del 标记，再按 Del 确认。"
+                        : "Press Del once to mark the session and Del again to delete it.",
+                    ),
+                  );
+                  continue;
+                }
                 return { shouldExit: false, processed: true };
               }
-              const deleteOptions = sessions.map((s: any) => {
-                const formattedDate = new Date(s.createdAt).toLocaleString();
-                return {
-                  value: s.id,
-                  label: `${s.id} - ${s.title || "Untitled"} (${formattedDate}) [${s.model}]`,
-                };
-              });
-              deleteOptions.push({
-                value: "cancel",
-                label: "Cancel",
-              });
-              stopTuiIfNeeded();
-              idToDelete = (await Prompt.askSelect(
-                "Choose a session to delete:",
-                deleteOptions,
-              )) ?? "";
             } else {
               // Check if index was provided instead of full id
               const idx = parseInt(idToDelete, 10);
@@ -1618,22 +1776,7 @@ export class CommandRouter {
               return { shouldExit: false, processed: true };
             }
 
-            // confirm deletion only if no arg was specified
-            let confirm = "yes";
-            if (!arg) {
-              stopTuiIfNeeded();
-              confirm = (await Prompt.askSelect(
-                `Are you sure you want to delete session ${idToDelete}?`,
-                [
-                  { value: "yes", label: "Yes, delete it" },
-                  { value: "no", label: "No, cancel" },
-                ],
-              )) ?? "no";
-            }
-
-            if (confirm === "yes") {
-              handleDelete(idToDelete);
-            }
+            handleDelete(idToDelete);
             return { shouldExit: false, processed: true };
           }
 
@@ -1726,104 +1869,119 @@ export class CommandRouter {
             return { shouldExit: false, processed: true };
           }
 
-          const sessionOptions = sessions.map((s: any) => {
-            const formattedDate = new Date(s.createdAt).toLocaleString();
-            return {
-              value: s.id,
-              label: `${s.id} - ${s.title || "Untitled"} (${formattedDate}) [${s.model}]`,
-            };
-          });
+          let chatMenuInitialSelectedValue: string | undefined;
+          while (true) {
+            sessions = loop.getSessions();
+            if (sessions.length === 0) {
+              const activeModel =
+                loop.getModelOverride() || config.models.default;
+              const newSessionId = loop.startNewSession(
+                this.providerInstance.id,
+                activeModel,
+              );
+              tui.loadHistory([]);
+              restoreTuiAndPrint(
+                picocolors.green(`✔ Started new session: ${newSessionId}`),
+              );
+              this.saveLocalState({
+                lastSessionId: newSessionId,
+                lastModel: activeModel,
+              });
+              return { shouldExit: false, processed: true };
+            }
 
-          sessionOptions.unshift({
-            value: "new",
-            label: picocolors.green("+ Start a new session"),
-          });
-          sessionOptions.unshift({
-            value: "delete_menu",
-            label: picocolors.red("- Delete a session..."),
-          });
-          sessionOptions.push({
-            value: "cancel",
-            label: "Cancel",
-          });
-
-          stopTuiIfNeeded();
-          const selectedSessionId = await Prompt.askSelect(
-            "Choose a session to load:",
-            sessionOptions,
-          );
-
-          if (!selectedSessionId || selectedSessionId === "cancel") {
-            return { shouldExit: false, processed: true };
-          }
-
-          if (selectedSessionId === "delete_menu") {
-            const deleteOptions = sessions.map((s: any) => {
+            const sessionOptions: PromptOption[] = sessions.map((s: any) => {
               const formattedDate = new Date(s.createdAt).toLocaleString();
               return {
                 value: s.id,
                 label: `${s.id} - ${s.title || "Untitled"} (${formattedDate}) [${s.model}]`,
               };
             });
-            deleteOptions.push({
+
+            sessionOptions.unshift({
+              value: "new",
+              label: picocolors.green(
+                isZh ? "+ 新建会话" : "+ Start a new session",
+              ),
+              deleteDisabled: true,
+            });
+            sessionOptions.push({
               value: "cancel",
-              label: "Cancel",
+              label: isZh ? "取消" : "Cancel",
+              deleteDisabled: true,
             });
-            const idToDelete = await Prompt.askSelect(
-              "Choose a session to delete:",
-              deleteOptions,
+
+            stopTuiIfNeeded();
+            const sessionSelection = await Prompt.askSelectWithDelete(
+              isZh
+                ? "选择会话，Enter 打开；会话行可按 Del 标记，再按 Del 删除；Esc 退出:"
+                : "Choose a session. Enter opens it; Del marks a session and Del again deletes it; Esc exits:",
+              sessionOptions,
+              {
+                initialSelectedValue: chatMenuInitialSelectedValue,
+                suppressCloseRenderOnDelete: useFullscreenTui,
+              },
             );
 
-            if (idToDelete && idToDelete !== "cancel") {
-              const confirm = await Prompt.askSelect(
-                `Are you sure you want to delete session ${idToDelete}?`,
-                [
-                  { value: "yes", label: "Yes, delete it" },
-                  { value: "no", label: "No, cancel" },
-                ],
+            if (sessionSelection.action === "delete") {
+              const sessionsBeforeDelete = sessions;
+              chatMenuInitialSelectedValue = getNextSelectionAfterDelete(
+                sessionsBeforeDelete,
+                sessionSelection.value,
+                "new",
               );
-
-              if (confirm === "yes") {
-                handleDelete(idToDelete);
-              }
+              handleDelete(sessionSelection.value, { quiet: useFullscreenTui });
+              continue;
             }
-          } else if (selectedSessionId === "new") {
-            const activeModel =
-              loop.getModelOverride() || config.models.default;
-            const newSessionId = loop.startNewSession(
-              this.providerInstance.id,
-              activeModel,
-            );
-            tui.loadHistory([]);
-            console.log(
-              picocolors.green(`✔ Started new session: ${newSessionId}`),
-            );
 
-            this.saveLocalState({
-              lastSessionId: newSessionId,
-              lastModel: activeModel,
-            });
-          } else {
-            const success = loop.resumeSession(selectedSessionId);
-            if (success) {
-              tui.loadHistory(loop.getHistory());
-              console.log(
-                picocolors.green(
-                  `✔ Switched to session: ${selectedSessionId}`,
-                ),
+            const selectedSessionId =
+              sessionSelection.action === "select"
+                ? sessionSelection.value
+                : "";
+
+            if (!selectedSessionId || selectedSessionId === "cancel") {
+              return { shouldExit: false, processed: true };
+            }
+
+            if (selectedSessionId === "new") {
+              const activeModel =
+                loop.getModelOverride() || config.models.default;
+              const newSessionId = loop.startNewSession(
+                this.providerInstance.id,
+                activeModel,
+              );
+              tui.loadHistory([]);
+              restoreTuiAndPrint(
+                picocolors.green(`✔ Started new session: ${newSessionId}`),
               );
 
               this.saveLocalState({
-                lastSessionId: selectedSessionId,
-                lastModel: loop.getModelOverride() || config.models.default,
+                lastSessionId: newSessionId,
+                lastModel: activeModel,
               });
             } else {
-              console.log(
-                picocolors.red(
-                  `Failed to resume session: ${selectedSessionId}`,
-                ),
-              );
+              const success = loop.resumeSession(selectedSessionId);
+              if (success) {
+                tui.loadHistory(loop.getHistory());
+                restoreTuiAndPrint(
+                  picocolors.green(
+                    `✔ Switched to session: ${selectedSessionId}`,
+                  ),
+                );
+
+                this.saveLocalState({
+                  lastSessionId: selectedSessionId,
+                  lastModel: loop.getModelOverride() || config.models.default,
+                });
+              } else {
+                restoreTuiAndPrint(
+                  picocolors.red(
+                    `Failed to resume session: ${selectedSessionId}`,
+                  ),
+                );
+              }
             }
+            return { shouldExit: false, processed: true };
           }
         } finally {
           try {
@@ -1837,19 +1995,51 @@ export class CommandRouter {
       if (command === "/mode") {
         const isZh = config.language === "zh";
         const targetMode = parts.slice(1).join(" ").trim().toLowerCase();
+        const currentMode = loop.getConfig().permissions.mode;
+
+        const modeDescriptions: Record<string, string> = isZh
+          ? {
+              strict: "Strict  — 所有工具调用必须逐一确认",
+              normal: "Normal  — 写入/执行操作需要确认",
+              auto: "Auto    — 完全自动执行，仅阻止危险操作",
+              plan: "Plan    — 规划模式，无实际文件修改",
+            }
+          : {
+              strict: "Strict  — Confirm every tool call before execution",
+              normal: "Normal  — Confirm write/exec operations only",
+              auto: "Auto    — Fully autonomous, blocks dangerous cmds only",
+              plan: "Plan    — Planning mode, no actual file changes",
+            };
 
         if (!targetMode) {
-          console.log(
-            isZh
-              ? picocolors.yellow("用法: /mode <strict|normal|auto|plan>")
-              : picocolors.yellow("Usage: /mode <strict|normal|auto|plan>"),
-          );
+          // No arg: show interactive overlay picker
+          if (useFullscreenTui && tui.isActive) {
+            const question = isZh
+              ? `当前模式: ${picocolors.cyan(currentMode.toUpperCase())}\n\n选择新的安全模式:`
+              : `Current mode: ${picocolors.cyan(currentMode.toUpperCase())}\n\nSelect a security mode:`;
+            const choice = await Prompt.askSelect(question, [
+              { value: "strict", label: modeDescriptions.strict },
+              { value: "normal", label: modeDescriptions.normal },
+              { value: "auto", label: modeDescriptions.auto },
+              { value: "plan", label: modeDescriptions.plan },
+            ]);
+            if (choice && choice !== currentMode) {
+              loop.getConfig().permissions.mode = choice as any;
+              tui.syncFromLoop(loop);
+            }
+          } else {
+            console.log(
+              isZh
+                ? picocolors.yellow("用法: /mode <strict|normal|auto|plan>")
+                : picocolors.yellow("Usage: /mode <strict|normal|auto|plan>"),
+            );
+          }
           return { shouldExit: false, processed: true };
         }
 
         const validModes = ["strict", "normal", "auto", "plan"];
         if (!validModes.includes(targetMode)) {
-          console.log(
+          this.printOutput(
             isZh
               ? picocolors.red(
                   `✖ 无效的安全模式: ${targetMode}。可选模式: ${validModes.join(", ")}`,
@@ -1862,16 +2052,25 @@ export class CommandRouter {
         }
 
         loop.getConfig().permissions.mode = targetMode as any;
-        console.log(
-          isZh
-            ? picocolors.green(
-                `✔ 已切换安全模式至: ${targetMode.toUpperCase()}`,
-              )
-            : picocolors.green(
-                `✔ Switched security mode to: ${targetMode.toUpperCase()}`,
-              ),
-        );
         tui.syncFromLoop(loop);
+        if (useFullscreenTui && tui.isActive) {
+          const msg = isZh
+            ? `当前模式: ${picocolors.cyan(currentMode.toUpperCase())}\n\n${picocolors.green("✔")} 已切换安全模式至: ${picocolors.green(targetMode.toUpperCase())}`
+            : `Previous mode: ${picocolors.cyan(currentMode.toUpperCase())}\n\n${picocolors.green("✔")} Switched security mode to: ${picocolors.green(targetMode.toUpperCase())}`;
+          await Prompt.askSelect(msg, [
+            { value: "ok", label: isZh ? "返回对话" : "Return to Chat" },
+          ]);
+        } else {
+          this.printOutput(
+            isZh
+              ? picocolors.green(
+                  `✔ 已切换安全模式至: ${targetMode.toUpperCase()}`,
+                )
+              : picocolors.green(
+                  `✔ Switched security mode to: ${targetMode.toUpperCase()}`,
+                ),
+          );
+        }
         return { shouldExit: false, processed: true };
       }
 

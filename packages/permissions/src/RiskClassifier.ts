@@ -56,9 +56,10 @@ export class RiskClassifier {
 
       // Simple glob replacement matching
       const escaped = cleanPattern
-        .replace(/\./g, "\\.")
-        .replace(/\*\*/g, ".*")
-        .replace(/\*/g, "[^/]*");
+        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*\*/g, "__DOUBLE_STAR__")
+        .replace(/\*/g, "[^/]*")
+        .replace(/__DOUBLE_STAR__\/?/g, "(?:|.*/)");
 
       const regex = new RegExp(`^${escaped}$`);
       const regexEndsWith = new RegExp(`${escaped}$`);

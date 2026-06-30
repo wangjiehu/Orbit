@@ -11,6 +11,41 @@ export const ProviderConfigSchema = z.object({
   baseUrl: z.string().optional(),
   apiKeyEnv: z.string().optional(),
   apiKey: z.string().optional(),
+  apiKeyHeader: z.string().optional(),
+  apiKeyPrefix: z.string().optional(),
+  headers: z.record(z.string()).optional(),
+  models: z.array(z.string()).optional(),
+  requestTimeoutMs: z.number().int().min(1000).max(600000).optional(),
+  streamTimeoutMs: z.number().int().min(1000).max(600000).optional(),
+  maxRetries: z.number().int().min(0).max(5).optional(),
+  disablePreheat: z.boolean().optional(),
+  extraBody: z.record(z.unknown()).optional(),
+  capabilities: z
+    .object({
+      streaming: z.boolean().optional(),
+      toolCalls: z.boolean().optional(),
+      jsonMode: z.boolean().optional(),
+      thinking: z.boolean().optional(),
+      vision: z.boolean().optional(),
+      promptCaching: z.boolean().optional(),
+      maxContextTokens: z.number().int().positive().optional(),
+      maxOutputTokens: z.number().int().positive().optional(),
+    })
+    .optional(),
+  modelCapabilities: z
+    .record(
+      z.object({
+        streaming: z.boolean().optional(),
+        toolCalls: z.boolean().optional(),
+        jsonMode: z.boolean().optional(),
+        thinking: z.boolean().optional(),
+        vision: z.boolean().optional(),
+        promptCaching: z.boolean().optional(),
+        maxContextTokens: z.number().int().positive().optional(),
+        maxOutputTokens: z.number().int().positive().optional(),
+      }),
+    )
+    .optional(),
 });
 
 export const McpServerConfigSchema = z.object({
@@ -111,6 +146,11 @@ export const ConfigSchema = z.object({
       testCommands: z.array(z.string()).default([]),
     })
     .default({}),
+  agent: z
+    .object({
+      maxIterations: z.number().int().min(1).max(50).default(8),
+    })
+    .default({}),
   autocomplete: z
     .object({
       enabled: z.boolean().default(true),
@@ -143,7 +183,15 @@ export const ConfigSchema = z.object({
         .default({}),
       webSearch: z
         .object({
-          enabled: z.boolean().default(false),
+          enabled: z.boolean().default(true),
+          provider: z
+            .enum(["auto", "searxng", "tavily", "bing", "duckduckgo"])
+            .default("auto"),
+          searxngUrls: z.array(z.string()).default([]),
+          tavilyApiKeyEnv: z.string().default("TAVILY_API_KEY"),
+          tavilyBaseUrl: z.string().default("https://api.tavily.com/search"),
+          timeoutMs: z.number().int().min(1000).max(30000).default(8000),
+          maxResults: z.number().int().min(1).max(20).default(8),
         })
         .default({}),
       mcp: z
@@ -151,6 +199,17 @@ export const ConfigSchema = z.object({
           enabled: z.boolean().default(false),
         })
         .default({}),
+    })
+    .default({}),
+  skills: z
+    .object({
+      enabled: z.boolean().default(true),
+      directories: z
+        .array(z.string())
+        .default([".orbit/skills", ".agents/skills"]),
+      activation: z.enum(["explicit", "auto"]).default("auto"),
+      maxActive: z.number().int().min(0).max(8).default(3),
+      maxSkillBytes: z.number().int().min(512).max(200000).default(24000),
     })
     .default({}),
   mcpServers: z.record(McpServerConfigSchema).default({}),

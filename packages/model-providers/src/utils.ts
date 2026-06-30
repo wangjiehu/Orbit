@@ -65,7 +65,7 @@ export async function fetchWithRetry(
   while (true) {
     const controller = new AbortController();
     const signal = controller.signal;
-    
+
     let externalSignalAborted = false;
     const onExternalAbort = () => {
       externalSignalAborted = true;
@@ -74,7 +74,10 @@ export async function fetchWithRetry(
 
     if (init.signal) {
       if (init.signal.aborted) {
-        throw init.signal.reason || new DOMException("The user aborted a request.", "AbortError");
+        throw (
+          init.signal.reason ||
+          new DOMException("The user aborted a request.", "AbortError")
+        );
       }
       init.signal.addEventListener("abort", onExternalAbort);
     }
@@ -82,6 +85,7 @@ export async function fetchWithRetry(
     const timeoutId = setTimeout(() => {
       controller.abort();
     }, timeoutMs);
+    timeoutId.unref?.();
 
     try {
       const response = await fetch(url, {
@@ -98,12 +102,13 @@ export async function fetchWithRetry(
       if (!isTransient || attempt >= maxRetries) {
         return response;
       }
+      await response.body?.cancel();
     } catch (err: any) {
-      const isExternalAbort = externalSignalAborted || (init.signal?.aborted);
+      const isExternalAbort = externalSignalAborted || init.signal?.aborted;
       if (isExternalAbort) {
         throw err;
       }
-      
+
       const isTimeout = err.name === "AbortError" && !isExternalAbort;
       if (isTimeout) {
         if (attempt >= maxRetries) {
@@ -123,10 +128,9 @@ export async function fetchWithRetry(
 
     attempt++;
     const delay = Math.min(
-      10000,
-      Math.pow(2, attempt) * 1000 + Math.random() * 1000,
+      3000,
+      Math.pow(2, attempt) * 250 + Math.random() * 250,
     );
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
 }
-

@@ -108,8 +108,9 @@ export class VerificationContractManager {
           const matched = patterns.some((pattern) => {
             const escaped = pattern
               .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-              .replace(/\*\*/g, ".*")
-              .replace(/\*/g, "[^/]*");
+              .replace(/\*\*/g, "__DOUBLE_STAR__")
+              .replace(/\*/g, "[^/]*")
+              .replace(/__DOUBLE_STAR__\/?/g, "(?:|.*/)");
             const regex = new RegExp("^" + escaped + "$");
             return regex.test(file);
           });

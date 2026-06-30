@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "fs";
 import { createHash } from "crypto";
 import { dirname, join } from "path";
 import { estimateTokenCount } from "@orbit-build/shared";
@@ -57,7 +63,10 @@ export class PromptCacheSlabBuilder {
     return slab;
   }
 
-  public static markPrimed(slab: PromptCacheSlab, date = new Date()): PromptCacheSlab {
+  public static markPrimed(
+    slab: PromptCacheSlab,
+    date = new Date(),
+  ): PromptCacheSlab {
     const updated = {
       ...slab,
       lastPrimedAt: date.toISOString(),
@@ -98,6 +107,14 @@ export class PromptCacheSlabBuilder {
     const sortedLanguages = [...ctx.projectIndex.detectedLanguages].sort();
     const sortedFrameworks = [...ctx.projectIndex.frameworks].sort();
     const sortedEntrypoints = [...ctx.projectIndex.entrypoints].sort();
+    const skillsIndex = (ctx.skillsIndex || [])
+      .map((skill) => {
+        const description = skill.description
+          ? ` - ${skill.description.replace(/\s+/g, " ").trim()}`
+          : "";
+        return `- ${skill.name}${description}`;
+      })
+      .join("\n");
 
     const stableWorkspace = [
       "### DeepSeek Cache Slab",
@@ -109,6 +126,7 @@ export class PromptCacheSlabBuilder {
       `Framework profile: ${sortedFrameworks.join(", ") || "None"}`,
       `Entrypoints: ${sortedEntrypoints.join(", ") || "None"}`,
       `PM: ${ctx.projectIndex.packageManager || "None"}`,
+      skillsIndex ? `\n### Available Skills\n${skillsIndex}` : "",
       ctx.projectInstructions
         ? `\n### Project Instructions\n${ctx.projectInstructions}`
         : "",

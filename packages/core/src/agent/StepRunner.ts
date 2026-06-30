@@ -1,10 +1,12 @@
 import { toolRegistry, ToolResult } from "@orbit-build/tools";
 import { OrbitToolCall } from "@orbit-build/model-providers";
+import type { OrbitConfig } from "@orbit-build/config";
 
 export class StepRunner {
   constructor(
     private cwd: string,
     private sessionId: string,
+    private config?: OrbitConfig,
   ) {}
 
   public async run(
@@ -51,6 +53,7 @@ export class StepRunner {
       const result = await tool.execute(validated.data, {
         cwd: this.cwd,
         sessionId: this.sessionId,
+        config: this.config,
         abortSignal: timeoutController.signal,
       });
 

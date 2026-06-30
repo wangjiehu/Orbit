@@ -1,10 +1,17 @@
 import { join, dirname } from "path";
 import { homedir } from "os";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "fs";
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  statSync,
+} from "fs";
 import { exec } from "child_process";
 import readline from "readline";
-import { Prompt, Renderer } from "@orbit-build/tui";
+import { Prompt, Renderer, type PromptOption } from "@orbit-build/tui";
 import { BUILTIN_SLASH_COMMANDS } from "../runtime/CommandRouter.js";
+import { getProviderModelCandidates } from "../runtime/ModelCatalog.js";
 
 export function previousCodePointIndex(text: string, index: number): number {
   const safeIndex = Math.max(0, Math.min(index, text.length));
@@ -134,19 +141,19 @@ export async function pageText(text: string): Promise<void> {
 
 // ─── Shared ANSI colour helpers (class-level constant, avoids recreation per render) ───
 const MORANDI = {
-  user:      (s: string) => `\x1b[38;2;142;163;175m${s}\x1b[0m`,
-  userBold:  (s: string) => `\x1b[1;38;2;142;163;175m${s}\x1b[0m`,
-  asst:      (s: string) => `\x1b[38;2;143;153;129m${s}\x1b[0m`,
-  asstBold:  (s: string) => `\x1b[1;38;2;143;153;129m${s}\x1b[0m`,
-  cyan:      (s: string) => `\x1b[38;2;142;163;175m${s}\x1b[0m`,
-  accent:    (s: string) => `\x1b[38;2;200;170;120m${s}\x1b[0m`,
+  user: (s: string) => `\x1b[38;2;142;163;175m${s}\x1b[0m`,
+  userBold: (s: string) => `\x1b[1;38;2;142;163;175m${s}\x1b[0m`,
+  asst: (s: string) => `\x1b[38;2;143;153;129m${s}\x1b[0m`,
+  asstBold: (s: string) => `\x1b[1;38;2;143;153;129m${s}\x1b[0m`,
+  cyan: (s: string) => `\x1b[38;2;142;163;175m${s}\x1b[0m`,
+  accent: (s: string) => `\x1b[38;2;200;170;120m${s}\x1b[0m`,
   completed: (s: string) => `\x1b[38;2;135;165;130m${s}\x1b[0m`,
-  failed:    (s: string) => `\x1b[38;2;180;120;120m${s}\x1b[0m`,
-  warn:      (s: string) => `\x1b[38;2;180;140;130m${s}\x1b[0m`,
-  white:     (s: string) => `\x1b[38;2;230;225;215m${s}\x1b[0m`,
+  failed: (s: string) => `\x1b[38;2;180;120;120m${s}\x1b[0m`,
+  warn: (s: string) => `\x1b[38;2;180;140;130m${s}\x1b[0m`,
+  white: (s: string) => `\x1b[38;2;230;225;215m${s}\x1b[0m`,
   whiteBold: (s: string) => `\x1b[1;38;2;230;225;215m${s}\x1b[0m`,
-  gray:      (s: string) => `\x1b[38;2;150;150;150m${s}\x1b[0m`,
-  dim:       (s: string) => `\x1b[2;38;2;110;110;110m${s}\x1b[0m`,
+  gray: (s: string) => `\x1b[38;2;150;150;150m${s}\x1b[0m`,
+  dim: (s: string) => `\x1b[2;38;2;110;110;110m${s}\x1b[0m`,
 } as const;
 
 // Width of the fixed input-box left prefix "  │ orbit > " (constant, pre-calculated)
@@ -162,6 +169,135 @@ export function selectActiveSlashSuggestion(
   return matches[idx] || input;
 }
 
+export function getSlashSuggestionFooterText(
+  isZh: boolean,
+  matchCount: number,
+): string {
+  return isZh
+    ? `↑/↓ 选择  Enter 运行所选  Tab 填入  Esc 关闭  ·  ${matchCount} 项`
+    : `↑/↓ select  Enter run selected  Tab fill  Esc close  ·  ${matchCount} match(es)`;
+}
+
+const ANSI_PATTERN =
+  /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
+
+export function stripAnsiCodes(str: string): string {
+  return str.replace(ANSI_PATTERN, "");
+}
+
+export function filterPromptOptionIndices(
+  options: PromptOption[],
+  query: string,
+): number[] {
+  const terms = stripAnsiCodes(query)
+    .trim()
+    .toLocaleLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (terms.length === 0) {
+    return options.map((_, index) => index);
+  }
+
+  return options
+    .map((option, index) => ({ option, index }))
+    .filter(({ option }) => {
+      const haystack = stripAnsiCodes(
+        [option.label, option.value, option.hint || ""].join(" "),
+      ).toLocaleLowerCase();
+      return terms.every((term) => haystack.includes(term));
+    })
+    .map(({ index }) => index);
+}
+
+function normalizeMatchText(text: string): string {
+  return stripAnsiCodes(text)
+    .toLocaleLowerCase()
+    .replace(/[_/\\:-]+/g, " ");
+}
+
+function isOrderedSubsequence(needle: string, haystack: string): boolean {
+  if (needle.length === 0) return true;
+  let pos = 0;
+  for (const char of haystack) {
+    if (char === needle[pos]) {
+      pos++;
+      if (pos === needle.length) return true;
+    }
+  }
+  return false;
+}
+
+export function rankSlashCandidates(
+  candidates: string[],
+  input: string,
+): string[] {
+  const rawQuery = stripAnsiCodes(input).trim();
+  if (!rawQuery || rawQuery === "/") return candidates;
+
+  const normalizedQuery = normalizeMatchText(rawQuery);
+  const queryNoSlash = normalizedQuery.replace(/^\s*\/\s*/, "").trim();
+  const terms = queryNoSlash.split(/\s+/).filter(Boolean);
+
+  return candidates
+    .map((candidate, index) => {
+      const normalizedCandidate = normalizeMatchText(candidate);
+      const candidateNoSlash = normalizedCandidate
+        .replace(/^\s*\/\s*/, "")
+        .trim();
+
+      let score = Number.POSITIVE_INFINITY;
+      if (normalizedCandidate === normalizedQuery) {
+        score = 0;
+      } else if (normalizedCandidate.startsWith(normalizedQuery)) {
+        score = 10;
+      } else if (queryNoSlash && candidateNoSlash.startsWith(queryNoSlash)) {
+        score = 20;
+      } else if (
+        terms.length > 0 &&
+        terms.every((term) => normalizedCandidate.includes(term))
+      ) {
+        const positionScore = terms.reduce(
+          (sum, term) => sum + Math.max(0, normalizedCandidate.indexOf(term)),
+          0,
+        );
+        score = 50 + positionScore + normalizedCandidate.length / 1000;
+      } else if (
+        queryNoSlash.length >= 2 &&
+        isOrderedSubsequence(queryNoSlash.replace(/\s+/g, ""), candidateNoSlash)
+      ) {
+        score = 100 + candidateNoSlash.length;
+      }
+
+      return { candidate, index, score };
+    })
+    .filter((entry) => Number.isFinite(entry.score))
+    .sort((a, b) => a.score - b.score || a.index - b.index)
+    .map((entry) => entry.candidate);
+}
+
+export function findPreviousHistoryEntry(
+  history: string[],
+  query: string,
+  startIndex = history.length,
+): { entry: string; index: number } | null {
+  if (history.length === 0) return null;
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const cappedStart = Math.max(0, Math.min(startIndex, history.length));
+
+  for (let offset = 0; offset < history.length; offset++) {
+    const index = (cappedStart - 1 - offset + history.length) % history.length;
+    const entry = history[index];
+    if (
+      !normalizedQuery ||
+      entry.toLocaleLowerCase().includes(normalizedQuery)
+    ) {
+      return { entry, index };
+    }
+  }
+
+  return null;
+}
+
 /** One conversation turn in the TUI history view. */
 type HistoryEntry = {
   role: "user" | "assistant" | "system";
@@ -173,15 +309,38 @@ type HistoryEntry = {
 };
 
 interface TuiTurn {
-  user: HistoryEntry;
+  user?: HistoryEntry;
   assistant?: HistoryEntry;
   system: HistoryEntry[];
 }
 
+interface TuiPrompt {
+  type: "select" | "multiselect" | "text" | "confirm" | "password";
+  message: string;
+  options: PromptOption[];
+  initialValue?: string;
+  initialSelectedValue?: string;
+  deletable?: boolean;
+  suppressCloseRenderOnDelete?: boolean;
+  pendingDeleteValue?: string | null;
+  pendingDeleteAt?: number;
+  filterQuery: string;
+  filterActive: boolean;
+  resolve: (value: any) => void;
+  selectedIndex: number;
+  selectedValues: Set<string>;
+  inputValue: string;
+  cursorPosition: number;
+}
+
+interface WrappedInputLine {
+  text: string;
+  start: number;
+  end: number;
+}
 
 export class FullscreenTui {
   private history: HistoryEntry[] = [];
-
 
   private inputBuffer = "";
   private cursorPosition = 0;
@@ -191,6 +350,7 @@ export class FullscreenTui {
   // Command history
   private inputHistory: string[] = [];
   private historyIndex = -1;
+  private historySearchQuery: string | null = null;
   private tempBuffer = "";
   private activeCommandIndex = 0;
   private ctrlCPressedOnce = false;
@@ -207,6 +367,8 @@ export class FullscreenTui {
   private firstDeltaTime = 0;
   private thoughtTimer: NodeJS.Timeout | null = null;
   private thoughtElapsed = 0;
+  private activePrompt: TuiPrompt | null = null;
+
   private isThinking = false;
 
   private sessionCost = 0;
@@ -243,7 +405,6 @@ export class FullscreenTui {
   private hasWrittenStdoutSinceStop = false;
   private originalStdinEmit: any = null;
 
-
   private candidates: {
     commands: string[];
     files: string[];
@@ -255,7 +416,13 @@ export class FullscreenTui {
   private permissionsMode = "normal";
   private hideAutocomplete = false;
   /** Cached logo-line widths — static strings, computed once. */
-  private _cachedLogoWidths: { w0: number; w1: number; w2: number; w3: number; maxW: number } | null = null;
+  private _cachedLogoWidths: {
+    w0: number;
+    w1: number;
+    w2: number;
+    w3: number;
+    maxW: number;
+  } | null = null;
 
   private cachedPlanLines: string[] = [];
   private lastPlanReadTime = 0;
@@ -357,6 +524,112 @@ export class FullscreenTui {
       return this.originalWrite(chunk, encoding, cb);
     };
     this.loadInputHistory();
+  }
+
+  private formatSystemStatusLine(
+    rawLine: string,
+    prefixUnknown: boolean,
+  ): string {
+    const morandi = MORANDI;
+    const plain = stripAnsiCodes(rawLine.trim()).trim();
+    if (!plain) return "";
+    if (/^(?:✓|✔)\s*Success/i.test(plain) || /^✖\s*Failed/i.test(plain)) {
+      return "";
+    }
+    if (plain.startsWith("✔")) {
+      return morandi.completed("completed") + morandi.gray(plain.substring(1));
+    }
+    if (plain.startsWith("✖")) {
+      return morandi.failed("failed") + morandi.gray(plain.substring(1));
+    }
+    if (plain.startsWith("●")) {
+      return morandi.cyan("●") + morandi.gray(plain.substring(1));
+    }
+    if (plain.startsWith("✦")) {
+      return morandi.cyan("✦") + morandi.gray(plain.substring(1));
+    }
+    if (plain.startsWith("⚠")) {
+      return morandi.warn("⚠") + morandi.gray(plain.substring(1));
+    }
+    if (prefixUnknown) {
+      return morandi.cyan("✦") + " " + morandi.gray(plain);
+    }
+    return morandi.gray(plain);
+  }
+
+  private formatSystemLinesForDisplay(
+    system: HistoryEntry[],
+    options: { prefixUnknown: boolean; preserveBlank: boolean },
+  ): string[] {
+    const morandi = MORANDI;
+    const lines: string[] = [];
+    let webSearchCount = 0;
+    let webSearchResults = 0;
+    let lastWebSearchQuery = "";
+
+    const flushWebSearchSummary = () => {
+      if (webSearchCount === 0) return;
+      const resultsText =
+        webSearchResults > 0 ? ` · ${webSearchResults} results` : "";
+      const queryText = lastWebSearchQuery
+        ? this.truncatePlainToWidth(lastWebSearchQuery, 42)
+        : "";
+      const summary =
+        webSearchCount === 1
+          ? `web_search${queryText ? ` ${queryText}` : ""}${resultsText}`
+          : `web_search ${webSearchCount} searches${resultsText}${
+              queryText ? ` · latest: ${queryText}` : ""
+            }`;
+      lines.push(morandi.cyan("✦") + " " + morandi.gray(summary));
+      webSearchCount = 0;
+      webSearchResults = 0;
+      lastWebSearchQuery = "";
+    };
+
+    for (const sys of system) {
+      const rawLines = sys.text.split("\n");
+      for (const rawLine of rawLines) {
+        const plain = stripAnsiCodes(rawLine.trim()).trim();
+        if (!plain) {
+          flushWebSearchSummary();
+          if (options.preserveBlank) lines.push("");
+          continue;
+        }
+
+        const webSearchMatch = plain.match(
+          /^✦\s*(?:✨\s*)?web_search\b\s*(.*)$/i,
+        );
+        if (webSearchMatch) {
+          webSearchCount += 1;
+          const query = webSearchMatch[1]?.trim();
+          if (query) lastWebSearchQuery = query;
+          continue;
+        }
+
+        const webSearchSuccess = plain.match(
+          /^(?:✓|✔)\s*Success:\s*Web search returned\s+(\d+)\s+results?/i,
+        );
+        if (webSearchSuccess) {
+          webSearchResults += Number(webSearchSuccess[1] || 0);
+          continue;
+        }
+
+        if (/^⚠.*DeepSeek cache hit degraded/i.test(plain)) {
+          continue;
+        }
+
+        flushWebSearchSummary();
+        const formatted = this.formatSystemStatusLine(
+          rawLine,
+          options.prefixUnknown,
+        );
+        if (formatted) {
+          lines.push(formatted);
+        }
+      }
+    }
+    flushWebSearchSummary();
+    return lines;
   }
 
   public setCandidates(candidates: any) {
@@ -509,7 +782,6 @@ export class FullscreenTui {
     }
   }
 
-
   public dispose() {
     this.stopThinkingInput();
     this.stop();
@@ -557,7 +829,12 @@ export class FullscreenTui {
       }
 
       // Find lockfiles
-      const lockfiles = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"];
+      const lockfiles = [
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lockb",
+      ];
       let maxLockfileMtime = 0;
       let hasLockfile = false;
 
@@ -741,7 +1018,7 @@ export class FullscreenTui {
           return;
         }
 
-        if (key && (key.name === "escape" || (key.ctrl && key.name === "c"))) {
+        if (key && key.ctrl && key.name === "c") {
           if (this.inputBuffer.length > 0) {
             this.inputBuffer = "";
             this.cursorPosition = 0;
@@ -768,6 +1045,16 @@ export class FullscreenTui {
           return;
         }
 
+        if (key && key.ctrl && key.name === "j") {
+          this.inputBuffer =
+            this.inputBuffer.slice(0, this.cursorPosition) +
+            "\n" +
+            this.inputBuffer.slice(this.cursorPosition);
+          this.cursorPosition += 1;
+          this.render();
+          return;
+        }
+
         if (key && (key.name === "home" || (key.ctrl && key.name === "a"))) {
           this.cursorPosition = 0;
           this.render();
@@ -781,20 +1068,29 @@ export class FullscreenTui {
         }
 
         if (key && (key.ctrl || key.meta) && key.name === "left") {
-          this.cursorPosition = previousWordIndex(this.inputBuffer, this.cursorPosition);
+          this.cursorPosition = previousWordIndex(
+            this.inputBuffer,
+            this.cursorPosition,
+          );
           this.render();
           return;
         }
 
         if (key && (key.ctrl || key.meta) && key.name === "right") {
-          this.cursorPosition = nextWordIndex(this.inputBuffer, this.cursorPosition);
+          this.cursorPosition = nextWordIndex(
+            this.inputBuffer,
+            this.cursorPosition,
+          );
           this.render();
           return;
         }
 
         if (key && key.ctrl && (key.name === "backspace" || key.name === "w")) {
           if (this.cursorPosition > 0) {
-            const targetPos = previousWordIndex(this.inputBuffer, this.cursorPosition);
+            const targetPos = previousWordIndex(
+              this.inputBuffer,
+              this.cursorPosition,
+            );
             this.inputBuffer =
               this.inputBuffer.slice(0, targetPos) +
               this.inputBuffer.slice(this.cursorPosition);
@@ -806,7 +1102,10 @@ export class FullscreenTui {
 
         if (key && key.ctrl && key.name === "delete") {
           if (this.cursorPosition < this.inputBuffer.length) {
-            const targetPos = nextWordIndex(this.inputBuffer, this.cursorPosition);
+            const targetPos = nextWordIndex(
+              this.inputBuffer,
+              this.cursorPosition,
+            );
             this.inputBuffer =
               this.inputBuffer.slice(0, this.cursorPosition) +
               this.inputBuffer.slice(targetPos);
@@ -914,7 +1213,7 @@ export class FullscreenTui {
   }
 
   private getActiveMatches(): string[] {
-    if (!this.candidates || !this.inputBuffer.startsWith("/")) return [];
+    if (!this.inputBuffer.startsWith("/")) return [];
     if (this.hideAutocomplete) return [];
 
     const line = this.inputBuffer;
@@ -932,75 +1231,36 @@ export class FullscreenTui {
       } else if (query.startsWith("--readonly ")) {
         prefix = "/add --readonly ";
         query = query.slice(11).trim();
-      } else if (query === "-r" || query === "--read-only" || query === "--readonly") {
+      } else if (
+        query === "-r" ||
+        query === "--read-only" ||
+        query === "--readonly"
+      ) {
         query = "";
         prefix = `/add ${parts[1]} `;
       }
-      const hits = (this.candidates.files || [])
-        .filter((f) => f.toLowerCase().includes(query.toLowerCase()))
-        .map((f) => `${prefix}${f}`);
+      const hits = rankSlashCandidates(
+        (this.candidates?.files || []).map((f) => `${prefix}${f}`),
+        line,
+      );
       if (hits.length > 0) return hits;
     }
 
     if (parts[0] === "/drop" && line.includes(" ")) {
-      const query = line.slice(6).trim();
-      const hits = (this.candidates.files || [])
-        .filter((f) => f.toLowerCase().includes(query.toLowerCase()))
-        .map((f) => `/drop ${f}`);
+      const hits = rankSlashCandidates(
+        (this.candidates?.files || []).map((f) => `/drop ${f}`),
+        line,
+      );
       if (hits.length > 0) return hits;
     }
 
     if (parts[0] === "/model" && line.includes(" ")) {
-      const query = line.slice(7).trim();
-      const defaultProvider = this.config?.provider?.default;
-      const providerConfig = this.config?.providers?.[defaultProvider];
-      const providerType = providerConfig?.type;
+      const models = getProviderModelCandidates(this.config);
 
-      let models: string[] = [];
-      if (
-        providerType === "anthropic" ||
-        providerType === "anthropic-compatible"
-      ) {
-        models = [
-          "claude-3-5-sonnet-latest",
-          "claude-3-5-haiku-latest",
-          "claude-3-opus-latest",
-        ];
-      } else if (providerType === "openai") {
-        models = ["gpt-4o", "gpt-4o-mini", "o1", "o3-mini"];
-      } else if (providerType === "openai-compatible") {
-        if (defaultProvider?.includes("deepseek")) {
-          models = [
-            "deepseek-v4-flash",
-            "deepseek-v4-pro",
-            "deepseek-ai/DeepSeek-V4-Flash-DSpark",
-            "deepseek-ai/DeepSeek-V4-Pro-DSpark",
-          ];
-        } else {
-          models = [
-            "gpt-4o",
-            "gpt-4o-mini",
-            "deepseek-ai/DeepSeek-V4-Flash-DSpark",
-            "deepseek-ai/DeepSeek-V4-Pro-DSpark",
-          ];
-        }
-      } else if (providerType === "ollama") {
-        models = ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b", "llama3"];
-      } else {
-        models = [
-          "deepseek-v4-flash",
-          "deepseek-v4-pro",
-          "deepseek-ai/DeepSeek-V4-Flash-DSpark",
-          "deepseek-ai/DeepSeek-V4-Pro-DSpark",
-          "gpt-4o",
-          "o3-mini",
-          "claude-3-5-sonnet-latest",
-        ];
-      }
-
-      const hits = models
-        .filter((m) => m.toLowerCase().includes(query.toLowerCase()))
-        .map((m) => `/model ${m}`);
+      const hits = rankSlashCandidates(
+        models.map((m) => `/model ${m}`),
+        line,
+      );
       if (hits.length > 0) return hits;
     }
 
@@ -1008,9 +1268,10 @@ export class FullscreenTui {
       // 1. If it's just "/chat " completing the subcommand
       if (parts.length <= 2) {
         const subcommands = ["list", "ls", "new", "delete", "rm", "switch"];
-        const hits = subcommands
-          .map((sub) => `/chat ${sub}`)
-          .filter((c) => c.startsWith(line));
+        const hits = rankSlashCandidates(
+          subcommands.map((sub) => `/chat ${sub}`),
+          line,
+        );
         if (hits.length > 0) return hits;
       }
 
@@ -1018,25 +1279,14 @@ export class FullscreenTui {
       if (parts.length >= 3 && ["delete", "rm", "switch"].includes(parts[1])) {
         const cmd = parts[0];
         const sub = parts[1];
-        const query = parts.slice(2).join(" ");
         const prefix = `${cmd} ${sub} `;
-        const hits = (this.candidates.sessions || [])
-          .filter((s) => {
-            const lowerS = s.toLowerCase();
-            const lowerQ = query.toLowerCase();
-            return (
-              lowerS.startsWith(lowerQ) ||
-              s
-                .replace(/^sess_/, "")
-                .toLowerCase()
-                .startsWith(lowerQ)
-            );
-          })
-          .map((s) => `${prefix}${s}`);
+        const hits = rankSlashCandidates(
+          (this.candidates?.sessions || []).map((s) => `${prefix}${s}`),
+          line,
+        );
         if (hits.length > 0) return hits;
       }
     }
-
 
     const cmds =
       this.candidates &&
@@ -1044,7 +1294,7 @@ export class FullscreenTui {
       this.candidates.commands.length > 0
         ? this.candidates.commands
         : BUILTIN_SLASH_COMMANDS;
-    return cmds.filter((c) => c.startsWith(line));
+    return rankSlashCandidates(cmds, line);
   }
 
   private getSuggestion(): string {
@@ -1053,7 +1303,7 @@ export class FullscreenTui {
     if (matches.length > 0) {
       const idx = Math.min(this.activeCommandIndex, matches.length - 1);
       const match = matches[idx];
-      if (match && match !== line) {
+      if (match && match !== line && match.startsWith(line)) {
         return match.substring(line.length);
       }
     }
@@ -1178,7 +1428,7 @@ export class FullscreenTui {
     this.render();
   }
 
-  public loadHistory(loopHistory: any[]) {
+  public loadHistory(loopHistory: any[], options: { silent?: boolean } = {}) {
     this.history = [];
     this.historyScrollOffset = 0;
     this.hasNewOutputWhileScrolled = false;
@@ -1214,7 +1464,479 @@ export class FullscreenTui {
         });
       }
     }
-    this.render();
+    if (!options.silent) {
+      this.render();
+    }
+  }
+
+  private getPromptOptionIndices(prompt: TuiPrompt): number[] {
+    return filterPromptOptionIndices(prompt.options, prompt.filterQuery);
+  }
+
+  private ensurePromptSelectionVisible(prompt: TuiPrompt): number[] {
+    const indices = this.getPromptOptionIndices(prompt);
+    if (indices.length > 0 && !indices.includes(prompt.selectedIndex)) {
+      prompt.selectedIndex = indices[0];
+    }
+    return indices;
+  }
+
+  private movePromptSelection(prompt: TuiPrompt, delta: number): void {
+    const indices = this.ensurePromptSelectionVisible(prompt);
+    if (indices.length === 0) return;
+
+    const currentPosition = Math.max(0, indices.indexOf(prompt.selectedIndex));
+    const nextPosition =
+      (currentPosition + delta + indices.length * 1000) % indices.length;
+    prompt.selectedIndex = indices[nextPosition];
+  }
+
+  private setPromptSelectionToEdge(
+    prompt: TuiPrompt,
+    edge: "first" | "last",
+  ): void {
+    const indices = this.ensurePromptSelectionVisible(prompt);
+    if (indices.length === 0) return;
+    prompt.selectedIndex =
+      edge === "first" ? indices[0] : indices[indices.length - 1];
+  }
+
+  private truncatePlainToWidth(text: string, maxWidth: number): string {
+    if (maxWidth <= 0) return "";
+    const plain = stripAnsiCodes(text);
+    if (this.getStringWidth(plain) <= maxWidth) return plain;
+    if (maxWidth <= 3) return this.truncateToWidth(plain, maxWidth);
+    return this.truncateToWidth(plain, maxWidth - 3) + "...";
+  }
+
+  private getCursorPositionInWrappedInput(
+    wrappedInputLines: WrappedInputLine[],
+  ): { lineIndex: number; xOffset: number } {
+    for (let i = 0; i < wrappedInputLines.length; i++) {
+      const line = wrappedInputLines[i];
+      if (
+        this.cursorPosition >= line.start &&
+        this.cursorPosition <= line.end
+      ) {
+        const subStr = line.text.substring(
+          0,
+          Math.max(0, this.cursorPosition - line.start),
+        );
+        return { lineIndex: i, xOffset: this.getStringWidth(subStr) };
+      }
+    }
+    const lastIndex = Math.max(0, wrappedInputLines.length - 1);
+    const lastLine = wrappedInputLines[lastIndex] || {
+      text: "",
+      start: 0,
+      end: 0,
+    };
+    return {
+      lineIndex: lastIndex,
+      xOffset: this.getStringWidth(lastLine.text),
+    };
+  }
+
+  public showPrompt(config: {
+    type: "select" | "multiselect" | "text" | "confirm" | "password";
+    message: string;
+    options?: PromptOption[];
+    initialValue?: string;
+    initialSelectedValue?: string;
+    deletable?: boolean;
+    suppressCloseRenderOnDelete?: boolean;
+  }): Promise<any> {
+    return new Promise((resolve) => {
+      const options = config.options || [];
+      this.activePrompt = {
+        type: config.type,
+        message: config.message,
+        options,
+        initialValue: config.initialValue || "",
+        initialSelectedValue: config.initialSelectedValue,
+        deletable: config.deletable,
+        suppressCloseRenderOnDelete: config.suppressCloseRenderOnDelete,
+        pendingDeleteValue: null,
+        pendingDeleteAt: 0,
+        filterQuery: "",
+        filterActive: false,
+        resolve,
+        selectedIndex: 0,
+        selectedValues: new Set(),
+        inputValue: config.initialValue || "",
+        cursorPosition: (config.initialValue || "").length,
+      };
+
+      if (config.type === "confirm") {
+        this.activePrompt.options = [
+          { value: "yes", label: "Yes" },
+          { value: "no", label: "No" },
+        ];
+      }
+      if (
+        config.initialSelectedValue &&
+        (config.type === "select" || config.type === "multiselect")
+      ) {
+        const initialIndex = this.activePrompt.options.findIndex(
+          (option) => option.value === config.initialSelectedValue,
+        );
+        if (initialIndex >= 0) {
+          this.activePrompt.selectedIndex = initialIndex;
+        }
+      }
+
+      this.render();
+
+      const wasRaw = !!process.stdin.isRaw;
+      if (process.stdin.setRawMode) {
+        process.stdin.setRawMode(true);
+      }
+      process.stdin.resume();
+
+      const onPromptKeypress = (str: string, key: any) => {
+        if (!this.activePrompt) {
+          cleanup();
+          return;
+        }
+
+        try {
+          const prompt = this.activePrompt;
+          const options = prompt.options;
+          const completePrompt = (value: any) => {
+            cleanup();
+            this.activePrompt = null;
+            const isDeleteAction =
+              value && typeof value === "object" && value.action === "delete";
+            if (!isDeleteAction || !prompt.suppressCloseRenderOnDelete) {
+              this.render();
+            }
+            resolve(value);
+          };
+          const clearPendingDelete = () => {
+            prompt.pendingDeleteValue = null;
+            prompt.pendingDeleteAt = 0;
+          };
+          const isListPrompt =
+            prompt.type === "select" || prompt.type === "multiselect";
+          const moveSelection = (delta: number) => {
+            clearPendingDelete();
+            this.movePromptSelection(prompt, delta);
+            this.render();
+          };
+
+          if (key && key.ctrl && key.name === "c") {
+            if (prompt.type === "confirm") {
+              completePrompt(false);
+            } else if (prompt.deletable && prompt.type === "select") {
+              completePrompt({ action: "cancel" });
+            } else {
+              completePrompt(null);
+            }
+            return;
+          }
+
+          if (isListPrompt && key && key.name === "/" && !prompt.filterActive) {
+            clearPendingDelete();
+            prompt.filterActive = true;
+            this.render();
+            return;
+          }
+
+          if (isListPrompt && prompt.filterActive) {
+            if (key && key.name === "escape") {
+              clearPendingDelete();
+              if (prompt.filterQuery.length > 0) {
+                prompt.filterQuery = "";
+                this.ensurePromptSelectionVisible(prompt);
+              } else {
+                prompt.filterActive = false;
+              }
+              this.render();
+              return;
+            }
+
+            if (key && key.ctrl && key.name === "u") {
+              clearPendingDelete();
+              prompt.filterQuery = "";
+              this.ensurePromptSelectionVisible(prompt);
+              this.render();
+              return;
+            }
+
+            if (key && key.name === "backspace") {
+              clearPendingDelete();
+              const previousIndex = previousCodePointIndex(
+                prompt.filterQuery,
+                prompt.filterQuery.length,
+              );
+              prompt.filterQuery = prompt.filterQuery.slice(0, previousIndex);
+              this.ensurePromptSelectionVisible(prompt);
+              this.render();
+              return;
+            }
+
+            if (
+              str &&
+              !key?.ctrl &&
+              !key?.meta &&
+              !/[\u0000-\u001f\u007f]/.test(str)
+            ) {
+              clearPendingDelete();
+              prompt.filterQuery += str;
+              this.ensurePromptSelectionVisible(prompt);
+              this.render();
+              return;
+            }
+          }
+
+          if (key && key.name === "escape") {
+            if (prompt.type === "confirm") {
+              completePrompt(false);
+            } else if (prompt.deletable && prompt.type === "select") {
+              completePrompt({ action: "cancel" });
+            } else {
+              completePrompt(null);
+            }
+            return;
+          }
+
+          if (key && (key.name === "return" || key.name === "enter")) {
+            if (prompt.type === "select") {
+              const indices = this.ensurePromptSelectionVisible(prompt);
+              if (indices.length === 0) {
+                this.render();
+                return;
+              }
+              const value = options[prompt.selectedIndex]?.value || null;
+              completePrompt(
+                prompt.deletable && value ? { action: "select", value } : value,
+              );
+            } else if (prompt.type === "confirm") {
+              completePrompt(options[prompt.selectedIndex]?.value === "yes");
+            } else if (prompt.type === "multiselect") {
+              completePrompt(Array.from(prompt.selectedValues));
+            } else if (prompt.type === "text" || prompt.type === "password") {
+              completePrompt(prompt.inputValue);
+            }
+            return;
+          }
+
+          if (
+            prompt.type === "select" ||
+            prompt.type === "confirm" ||
+            prompt.type === "multiselect"
+          ) {
+            const visibleIndices =
+              prompt.type === "confirm"
+                ? options.map((_, index) => index)
+                : this.ensurePromptSelectionVisible(prompt);
+            if (visibleIndices.length === 0) {
+              return;
+            }
+
+            if (
+              prompt.type === "select" &&
+              prompt.deletable &&
+              key &&
+              key.name === "delete"
+            ) {
+              const option = options[prompt.selectedIndex];
+              if (
+                !option ||
+                option.deleteDisabled ||
+                !visibleIndices.includes(prompt.selectedIndex)
+              ) {
+                clearPendingDelete();
+                this.render();
+                return;
+              }
+
+              const armed = prompt.pendingDeleteValue === option.value;
+              if (armed) {
+                completePrompt({ action: "delete", value: option.value });
+                return;
+              }
+
+              prompt.pendingDeleteValue = option.value;
+              prompt.pendingDeleteAt = Date.now();
+              this.render();
+              return;
+            }
+
+            if (key && (key.name === "up" || str === "k")) {
+              moveSelection(-1);
+              return;
+            }
+            if (key && (key.name === "down" || str === "j")) {
+              moveSelection(1);
+              return;
+            }
+            if (key && key.name === "home") {
+              clearPendingDelete();
+              this.setPromptSelectionToEdge(prompt, "first");
+              this.render();
+              return;
+            }
+            if (key && key.name === "end") {
+              clearPendingDelete();
+              this.setPromptSelectionToEdge(prompt, "last");
+              this.render();
+              return;
+            }
+            if (key && key.name === "pageup") {
+              moveSelection(-8);
+              return;
+            }
+            if (key && key.name === "pagedown") {
+              moveSelection(8);
+              return;
+            }
+            if (
+              prompt.type === "multiselect" &&
+              key &&
+              (key.name === "space" || str === " ")
+            ) {
+              const val = options[prompt.selectedIndex]?.value;
+              if (val) {
+                if (prompt.selectedValues.has(val)) {
+                  prompt.selectedValues.delete(val);
+                } else {
+                  prompt.selectedValues.add(val);
+                }
+              }
+              this.render();
+              return;
+            }
+          } else if (prompt.type === "text" || prompt.type === "password") {
+            if (
+              key &&
+              (key.name === "home" || (key.ctrl && key.name === "a"))
+            ) {
+              prompt.cursorPosition = 0;
+              this.render();
+              return;
+            }
+            if (key && (key.name === "end" || (key.ctrl && key.name === "e"))) {
+              prompt.cursorPosition = prompt.inputValue.length;
+              this.render();
+              return;
+            }
+            if (key && (key.ctrl || key.meta) && key.name === "left") {
+              prompt.cursorPosition = previousWordIndex(
+                prompt.inputValue,
+                prompt.cursorPosition,
+              );
+              this.render();
+              return;
+            }
+            if (key && (key.ctrl || key.meta) && key.name === "right") {
+              prompt.cursorPosition = nextWordIndex(
+                prompt.inputValue,
+                prompt.cursorPosition,
+              );
+              this.render();
+              return;
+            }
+            if (
+              key &&
+              key.ctrl &&
+              (key.name === "backspace" || key.name === "w")
+            ) {
+              if (prompt.cursorPosition > 0) {
+                const targetPos = previousWordIndex(
+                  prompt.inputValue,
+                  prompt.cursorPosition,
+                );
+                prompt.inputValue =
+                  prompt.inputValue.slice(0, targetPos) +
+                  prompt.inputValue.slice(prompt.cursorPosition);
+                prompt.cursorPosition = targetPos;
+                this.render();
+              }
+              return;
+            }
+            if (key && key.ctrl && key.name === "u") {
+              prompt.inputValue = prompt.inputValue.slice(
+                prompt.cursorPosition,
+              );
+              prompt.cursorPosition = 0;
+              this.render();
+              return;
+            }
+            if (key && key.name === "backspace") {
+              if (prompt.cursorPosition > 0) {
+                const previousIndex = previousCodePointIndex(
+                  prompt.inputValue,
+                  prompt.cursorPosition,
+                );
+                prompt.inputValue =
+                  prompt.inputValue.substring(0, previousIndex) +
+                  prompt.inputValue.substring(prompt.cursorPosition);
+                prompt.cursorPosition = previousIndex;
+                this.render();
+              }
+              return;
+            }
+            if (key && key.name === "delete") {
+              if (prompt.cursorPosition < prompt.inputValue.length) {
+                const nextIndex = nextCodePointIndex(
+                  prompt.inputValue,
+                  prompt.cursorPosition,
+                );
+                prompt.inputValue =
+                  prompt.inputValue.substring(0, prompt.cursorPosition) +
+                  prompt.inputValue.substring(nextIndex);
+                this.render();
+              }
+              return;
+            }
+            if (key && key.name === "left") {
+              if (prompt.cursorPosition > 0) {
+                prompt.cursorPosition = previousCodePointIndex(
+                  prompt.inputValue,
+                  prompt.cursorPosition,
+                );
+                this.render();
+              }
+              return;
+            }
+            if (key && key.name === "right") {
+              if (prompt.cursorPosition < prompt.inputValue.length) {
+                prompt.cursorPosition = nextCodePointIndex(
+                  prompt.inputValue,
+                  prompt.cursorPosition,
+                );
+                this.render();
+              }
+              return;
+            }
+            if (
+              str &&
+              !key?.ctrl &&
+              !key?.meta &&
+              !/[\u0000-\u001f\u007f]/.test(str)
+            ) {
+              prompt.inputValue =
+                prompt.inputValue.substring(0, prompt.cursorPosition) +
+                str +
+                prompt.inputValue.substring(prompt.cursorPosition);
+              prompt.cursorPosition += str.length;
+              this.render();
+              return;
+            }
+          }
+        } catch {}
+      };
+
+      const cleanup = () => {
+        process.stdin.removeListener("keypress", onPromptKeypress);
+        if (process.stdin.setRawMode) {
+          process.stdin.setRawMode(wasRaw);
+        }
+      };
+
+      process.stdin.on("keypress", onPromptKeypress);
+    });
   }
 
   public async askInput(): Promise<string | null> {
@@ -1239,6 +1961,7 @@ export class FullscreenTui {
       this.inputBuffer = "";
       this.cursorPosition = 0;
       this.hideAutocomplete = false;
+      this.historySearchQuery = null;
       this.render();
 
       const wasRaw = !!process.stdin.isRaw;
@@ -1260,6 +1983,7 @@ export class FullscreenTui {
 
           if (key && key.ctrl && key.name === "c") {
             this.activeCommandIndex = 0;
+            this.historySearchQuery = null;
             if (this.inputBuffer.length > 0) {
               this.inputBuffer = "";
               this.cursorPosition = 0;
@@ -1283,11 +2007,35 @@ export class FullscreenTui {
             return;
           }
 
+          if (key && key.ctrl && key.name === "r") {
+            const query = this.historySearchQuery ?? this.inputBuffer;
+            const startIndex =
+              this.historyIndex >= 0
+                ? this.historyIndex
+                : this.inputHistory.length;
+            const match = findPreviousHistoryEntry(
+              this.inputHistory,
+              query,
+              startIndex,
+            );
+            if (match) {
+              this.historySearchQuery = query;
+              this.historyIndex = match.index;
+              this.inputBuffer = match.entry;
+              this.cursorPosition = this.inputBuffer.length;
+              this.activeCommandIndex = 0;
+              this.hideAutocomplete = true;
+              this.render();
+            }
+            return;
+          }
+
           if (key && (key.name === "return" || key.name === "enter")) {
             cleanup();
             process.stdout.write("\x1b[?25l");
             const submitted =
               this.acceptActiveSlashSuggestion() || this.inputBuffer;
+            this.historySearchQuery = null;
             this.resolveInput = null;
             this.historyScrollOffset = 0;
             this.hasNewOutputWhileScrolled = false;
@@ -1309,8 +2057,22 @@ export class FullscreenTui {
             return;
           }
 
+          if (key && key.ctrl && key.name === "j") {
+            this.activeCommandIndex = 0;
+            this.historySearchQuery = null;
+            this.hideAutocomplete = true;
+            this.inputBuffer =
+              this.inputBuffer.slice(0, this.cursorPosition) +
+              "\n" +
+              this.inputBuffer.slice(this.cursorPosition);
+            this.cursorPosition += 1;
+            this.render();
+            return;
+          }
+
           if (key && (key.name === "home" || (key.ctrl && key.name === "a"))) {
             this.activeCommandIndex = 0;
+            this.historySearchQuery = null;
             this.cursorPosition = 0;
             this.render();
             return;
@@ -1318,6 +2080,7 @@ export class FullscreenTui {
 
           if (key && (key.name === "end" || (key.ctrl && key.name === "e"))) {
             this.activeCommandIndex = 0;
+            this.historySearchQuery = null;
             this.cursorPosition = this.inputBuffer.length;
             this.render();
             return;
@@ -1325,6 +2088,7 @@ export class FullscreenTui {
 
           if (key && (key.ctrl || key.meta) && key.name === "left") {
             this.activeCommandIndex = 0;
+            this.historySearchQuery = null;
             this.cursorPosition = previousWordIndex(
               this.inputBuffer,
               this.cursorPosition,
@@ -1335,6 +2099,7 @@ export class FullscreenTui {
 
           if (key && (key.ctrl || key.meta) && key.name === "right") {
             this.activeCommandIndex = 0;
+            this.historySearchQuery = null;
             this.cursorPosition = nextWordIndex(
               this.inputBuffer,
               this.cursorPosition,
@@ -1343,9 +2108,14 @@ export class FullscreenTui {
             return;
           }
 
-          if (key && key.ctrl && (key.name === "backspace" || key.name === "w")) {
+          if (
+            key &&
+            key.ctrl &&
+            (key.name === "backspace" || key.name === "w")
+          ) {
             this.activeCommandIndex = 0;
             this.hideAutocomplete = false;
+            this.historySearchQuery = null;
             if (this.cursorPosition > 0) {
               const targetPos = previousWordIndex(
                 this.inputBuffer,
@@ -1363,6 +2133,7 @@ export class FullscreenTui {
           if (key && key.ctrl && key.name === "delete") {
             this.activeCommandIndex = 0;
             this.hideAutocomplete = false;
+            this.historySearchQuery = null;
             if (this.cursorPosition < this.inputBuffer.length) {
               const targetPos = nextWordIndex(
                 this.inputBuffer,
@@ -1378,6 +2149,7 @@ export class FullscreenTui {
 
           if (key && key.ctrl && key.name === "u") {
             this.activeCommandIndex = 0;
+            this.historySearchQuery = null;
             this.inputBuffer = "";
             this.cursorPosition = 0;
             this.render();
@@ -1385,6 +2157,7 @@ export class FullscreenTui {
           }
 
           if (key && key.name === "up") {
+            this.historySearchQuery = null;
             if (this.inputBuffer.startsWith("/")) {
               const matches = this.getActiveMatches();
               if (matches.length > 0) {
@@ -1410,6 +2183,7 @@ export class FullscreenTui {
           }
 
           if (key && key.name === "down") {
+            this.historySearchQuery = null;
             if (this.inputBuffer.startsWith("/")) {
               const matches = this.getActiveMatches();
               if (matches.length > 0) {
@@ -1434,6 +2208,7 @@ export class FullscreenTui {
           }
 
           if (key && key.name === "left") {
+            this.historySearchQuery = null;
             if (this.cursorPosition > 0) {
               this.cursorPosition = previousCodePointIndex(
                 this.inputBuffer,
@@ -1445,6 +2220,7 @@ export class FullscreenTui {
           }
 
           if (key && key.name === "right") {
+            this.historySearchQuery = null;
             if (this.cursorPosition < this.inputBuffer.length) {
               this.cursorPosition = nextCodePointIndex(
                 this.inputBuffer,
@@ -1462,6 +2238,7 @@ export class FullscreenTui {
           }
 
           if (key && key.name === "tab") {
+            this.historySearchQuery = null;
             if (this.inputBuffer.startsWith("/")) {
               const accepted = this.acceptActiveSlashSuggestion();
               if (accepted) {
@@ -1480,12 +2257,14 @@ export class FullscreenTui {
 
           if (key && key.ctrl && key.name === "l") {
             this.history = [];
+            this.historySearchQuery = null;
             this.render();
             return;
           }
 
           if (key && key.ctrl && key.name === "p") {
             this.activeCommandIndex = 0;
+            this.historySearchQuery = null;
             if (!this.inputBuffer.startsWith("/")) {
               this.inputBuffer = "/" + this.inputBuffer;
               this.cursorPosition = this.inputBuffer.length;
@@ -1497,6 +2276,7 @@ export class FullscreenTui {
           if (key && key.name === "delete") {
             this.activeCommandIndex = 0;
             this.hideAutocomplete = false;
+            this.historySearchQuery = null;
             if (this.cursorPosition < this.inputBuffer.length) {
               const nextIndex = nextCodePointIndex(
                 this.inputBuffer,
@@ -1513,6 +2293,7 @@ export class FullscreenTui {
           if (key && key.name === "backspace") {
             this.activeCommandIndex = 0;
             this.hideAutocomplete = false;
+            this.historySearchQuery = null;
             if (this.cursorPosition > 0) {
               const previousIndex = previousCodePointIndex(
                 this.inputBuffer,
@@ -1525,11 +2306,9 @@ export class FullscreenTui {
             }
           } else if (key && key.name === "escape") {
             this.activeCommandIndex = 0;
+            this.historySearchQuery = null;
             if (!this.hideAutocomplete) {
               this.hideAutocomplete = true;
-            } else if (this.inputBuffer.length > 0) {
-              this.inputBuffer = "";
-              this.cursorPosition = 0;
             }
             this.render();
           } else if (
@@ -1539,6 +2318,7 @@ export class FullscreenTui {
           ) {
             this.activeCommandIndex = 0;
             this.hideAutocomplete = false;
+            this.historySearchQuery = null;
             this.inputBuffer =
               this.inputBuffer.substring(0, this.cursorPosition) +
               str +
@@ -1669,19 +2449,259 @@ export class FullscreenTui {
     // Use the shared MORANDI constant (class-level) instead of recreating per frame
     const morandi = MORANDI;
 
+    if (this.activePrompt) {
+      const prompt = this.activePrompt;
+      const options = prompt.options;
+      const isZh = this.config?.language === "zh";
+
+      const title =
+        prompt.type === "confirm"
+          ? isZh
+            ? "确认"
+            : "Confirmation"
+          : prompt.type === "select"
+            ? isZh
+              ? "选择"
+              : "Selection"
+            : prompt.type === "multiselect"
+              ? isZh
+                ? "多选"
+                : "Multi-Selection"
+              : isZh
+                ? "输入"
+                : "Input";
+
+      const lines: string[] = [];
+      lines.push("");
+      lines.push(morandi.userBold("  Orbit " + title));
+      lines.push(morandi.gray("  " + "─".repeat(columns - 4)));
+      lines.push("");
+      const messageLines = prompt.message
+        .split("\n")
+        .flatMap((line) => this.wrapLine(stripAnsiCodes(line), columns - 8));
+      for (let i = 0; i < Math.min(messageLines.length, 5); i++) {
+        const prefix = i === 0 ? "? " : "  ";
+        lines.push(
+          "  " + morandi.cyan(prefix) + morandi.white(messageLines[i]),
+        );
+      }
+      if (messageLines.length > 5) {
+        lines.push(
+          "  " +
+            morandi.dim(
+              isZh
+                ? `... 还有 ${messageLines.length - 5} 行`
+                : `... ${messageLines.length - 5} more line(s)`,
+            ),
+        );
+      }
+      lines.push("");
+
+      let inputLineRow = 0;
+      if (
+        prompt.type === "select" ||
+        prompt.type === "confirm" ||
+        prompt.type === "multiselect"
+      ) {
+        const isSearchable =
+          prompt.type === "select" || prompt.type === "multiselect";
+        const filteredIndices =
+          prompt.type === "confirm"
+            ? options.map((_, index) => index)
+            : this.ensurePromptSelectionVisible(prompt);
+        const L = filteredIndices.length;
+        if (isSearchable && (prompt.filterActive || prompt.filterQuery)) {
+          const queryText = prompt.filterQuery || "";
+          const searchLabel = isZh ? "过滤" : "filter";
+          const placeholder = isZh ? "输入关键字" : "type keywords";
+          const visibleQuery =
+            queryText.length > 0 ? queryText : morandi.dim(placeholder);
+          const cursor = prompt.filterActive ? morandi.accent("▌") : "";
+          lines.push(
+            "  " +
+              morandi.dim(`${searchLabel}: `) +
+              morandi.white(stripAnsiCodes(visibleQuery)) +
+              cursor +
+              morandi.dim(`  ${L}/${options.length}`),
+          );
+          lines.push("");
+        }
+
+        const maxVisible = Math.max(5, Math.min(12, rows - lines.length - 6));
+
+        let startIdx = 0;
+        const selectedFilteredIndex = filteredIndices.indexOf(
+          prompt.selectedIndex,
+        );
+        if (selectedFilteredIndex >= maxVisible) {
+          startIdx = selectedFilteredIndex - maxVisible + 1;
+        }
+        if (startIdx + maxVisible > L) {
+          startIdx = L - maxVisible;
+        }
+        if (startIdx < 0) startIdx = 0;
+
+        const visibleOptionIndices = filteredIndices.slice(
+          startIdx,
+          startIdx + maxVisible,
+        );
+
+        if (startIdx > 0) {
+          lines.push(
+            morandi.gray(
+              isZh ? "    ▲ 上方还有更多选项" : "    ▲ more options above",
+            ),
+          );
+        }
+
+        if (visibleOptionIndices.length === 0) {
+          lines.push(
+            "    " +
+              morandi.warn(
+                isZh
+                  ? "没有匹配项，按 Esc 清空过滤"
+                  : "No matches. Press Esc to clear the filter.",
+              ),
+          );
+        }
+
+        for (let i = 0; i < visibleOptionIndices.length; i++) {
+          const actualIdx = visibleOptionIndices[i];
+          const opt = options[actualIdx];
+          const isSelected = actualIdx === prompt.selectedIndex;
+          const isChecked = prompt.selectedValues.has(opt.value);
+          const deleteArmed =
+            !!prompt.deletable && prompt.pendingDeleteValue === opt.value;
+
+          let prefix = "    ";
+          if (prompt.type === "multiselect") {
+            prefix = isChecked ? "[x] " : "[ ] ";
+          }
+
+          let lineText = prefix + stripAnsiCodes(opt.label);
+          if (opt.hint) {
+            lineText += ` (${stripAnsiCodes(opt.hint)})`;
+          }
+          if (deleteArmed) {
+            lineText += isZh ? "  再按 Del 删除" : "  Del again to delete";
+          } else if (
+            prompt.deletable &&
+            prompt.type === "select" &&
+            isSelected &&
+            !opt.deleteDisabled
+          ) {
+            lineText += isZh ? "  Del 标记删除" : "  Del to delete";
+          }
+
+          const marker = isSelected ? (deleteArmed ? "  ! " : "  ❯ ") : "    ";
+          const clipped = this.truncatePlainToWidth(
+            lineText.trim(),
+            Math.max(8, columns - this.getStringWidth(marker) - 6),
+          );
+          if (isSelected) {
+            const paint = deleteArmed ? morandi.warn : morandi.accent;
+            lines.push(paint(marker + clipped));
+          } else {
+            lines.push(marker + morandi.gray(clipped));
+          }
+        }
+
+        if (startIdx + maxVisible < L) {
+          lines.push(
+            morandi.gray(
+              isZh ? "    ▼ 下方还有更多选项" : "    ▼ more options below",
+            ),
+          );
+        }
+      } else if (prompt.type === "text" || prompt.type === "password") {
+        inputLineRow = lines.length + 1;
+        const displayVal =
+          prompt.type === "password"
+            ? "*".repeat(prompt.inputValue.length)
+            : prompt.inputValue;
+        lines.push("  " + displayVal);
+        lines.push(
+          "  " + morandi.gray("─".repeat(Math.max(20, displayVal.length + 4))),
+        );
+      }
+
+      // Add padding space
+      const remainingHeight = rows - lines.length - 5;
+      for (let i = 0; i < remainingHeight; i++) {
+        lines.push("");
+      }
+
+      // Slim cat watermark aligned to bottom-right
+      const catWidth = 7;
+      const leftPad = " ".repeat(Math.max(0, columns - catWidth - 4));
+      lines.push(leftPad + morandi.gray(" /\\ /\\ "));
+      lines.push(leftPad + morandi.gray("/ °_° \\"));
+
+      // Footer
+      lines.push(morandi.gray("  " + "─".repeat(columns - 4)));
+      let footerHelp = "";
+      if (
+        (prompt.type === "select" || prompt.type === "multiselect") &&
+        prompt.filterActive
+      ) {
+        footerHelp = isZh
+          ? "输入过滤 · Backspace 删除 · Ctrl+U 清空 · ↑/↓ 选择 · Enter 确认 · Esc 退出过滤"
+          : "type to filter · Backspace edit · Ctrl+U clear · ↑/↓ move · Enter confirm · Esc exit filter";
+      } else if (prompt.type === "multiselect") {
+        footerHelp = isZh
+          ? "↑/↓/j/k 选择 · / 过滤 · Space 勾选 · Enter 确认 · Esc 取消"
+          : "↑/↓/j/k move · / filter · Space toggle · Enter confirm · Esc cancel";
+      } else if (prompt.type === "select" && prompt.deletable) {
+        footerHelp = isZh
+          ? "↑/↓/j/k 选择 · / 过滤 · Enter 打开 · Del 标记 · 再 Del 删除 · Esc 取消"
+          : "↑/↓/j/k move · / filter · Enter open · Del mark · Del again delete · Esc cancel";
+      } else if (prompt.type === "select") {
+        footerHelp = isZh
+          ? "↑/↓/j/k 选择 · / 过滤 · Enter 确认 · Esc 取消"
+          : "↑/↓/j/k move · / filter · Enter select · Esc cancel";
+      } else if (prompt.type === "confirm") {
+        footerHelp = isZh
+          ? "↑/↓/j/k 选择 · Enter 确认 · Esc 取消"
+          : "↑/↓/j/k move · Enter select · Esc cancel";
+      } else {
+        footerHelp = isZh
+          ? "Ctrl+A/E 跳转 · Ctrl+W 删词 · Enter 确认 · Esc 取消"
+          : "Ctrl+A/E jump · Ctrl+W delete word · Enter confirm · Esc cancel";
+      }
+      lines.push(
+        "  " +
+          morandi.dim(
+            this.truncatePlainToWidth(footerHelp, Math.max(12, columns - 4)),
+          ),
+      );
+
+      let cursorSequence = "\x1b[?25l";
+      if (prompt.type === "text" || prompt.type === "password") {
+        cursorSequence = `\x1b[${inputLineRow};${2 + prompt.cursorPosition + 1}H\x1b[?25h`;
+      }
+
+      const output =
+        "\x1b[?25l\x1b[H" +
+        lines.map((line) => line + "\x1b[K").join("\n") +
+        "\x1b[J" +
+        cursorSequence;
+      this.originalWrite(output);
+      return;
+    }
+
     const isWaitingInput = this.resolveInput !== null;
     const isInputActive =
       isWaitingInput || this.thinkingKeypressListener !== null;
     const hasInput = isInputActive && this.inputBuffer.length > 0;
     const placeholder = isWaitingInput ? "Ask anything..." : "";
 
-
     // A.1 构建底部的圆角输入框与状态行以及指令匹配浮窗
     const boxWidth = columns - 4;
     const wrapWidth = Math.max(8, boxWidth - 14);
     const fullText = hasInput ? this.inputBuffer : placeholder;
 
-    const wrappedLines = this.wrapText(fullText, wrapWidth);
+    const wrappedInputLines = this.wrapInputText(fullText, wrapWidth);
+    const wrappedLines = wrappedInputLines.map((line) => line.text);
     const formattedLines = hasInput
       ? this.formatWrappedLines(wrappedLines, this.inputBuffer.length)
       : wrappedLines.map((line) => morandi.dim(line));
@@ -1779,7 +2799,26 @@ export class FullscreenTui {
         }
         const visibleMatches = matches.slice(startIdx, startIdx + maxVisible);
 
-        const maxPopupWidth = Math.min(86, Math.max(30, columns - 8));
+        const maxPopupWidth = Math.min(92, Math.max(34, columns - 8));
+        const visibleCommands = visibleMatches.map((cmd) => {
+          const selectedPrefix = " ❯ ";
+          const idlePrefix = "   ";
+          return {
+            cmd,
+            width: Math.max(
+              this.getStringWidth(`${selectedPrefix}${cmd}`),
+              this.getStringWidth(`${idlePrefix}${cmd}`),
+            ),
+          };
+        });
+        const widestCommand = visibleCommands.reduce(
+          (max, item) => Math.max(max, item.width),
+          0,
+        );
+        const commandColumnWidth = Math.min(
+          Math.max(18, widestCommand + 2),
+          Math.max(18, Math.floor(maxPopupWidth * 0.45)),
+        );
         const formattedMatches = visibleMatches.map((cmd) => {
           const isSelected =
             visibleMatches.indexOf(cmd) + startIdx === this.activeCommandIndex;
@@ -1805,22 +2844,18 @@ export class FullscreenTui {
             }
           }
 
-          // Ensure prefix + cmd + hint fits within maxPopupWidth.
-          // maxPopupWidth is at least 30. We keep at least 15 columns for leftPart.
-          const maxLeftW = Math.max(15, Math.floor(maxPopupWidth * 0.6));
-
           let leftPart = `${prefix}${cmd}`;
           let leftW = this.getStringWidth(leftPart);
-          if (leftW > maxLeftW) {
-            leftPart = this.truncateToWidth(leftPart, maxLeftW - 3) + "...";
+          if (leftW > commandColumnWidth) {
+            leftPart =
+              this.truncateToWidth(leftPart, commandColumnWidth - 3) + "...";
             leftW = this.getStringWidth(leftPart);
           }
 
           let rightPart = "";
           let rightW = 0;
           if (hint) {
-            // Available right-part width: popupWidth minus leftW, minus 1 (min spacing), minus 4 (rightPadding)
-          const availableRightW = maxPopupWidth - leftW - 1 - 4;
+            const availableRightW = maxPopupWidth - commandColumnWidth - 2 - 2;
             if (availableRightW >= 5) {
               const rawRightW = this.getStringWidth(hint);
               if (rawRightW <= availableRightW) {
@@ -1841,32 +2876,72 @@ export class FullscreenTui {
 
         bottomLines.push(morandi.gray("  ╭" + "─".repeat(popupWidth) + "╮"));
         for (const fm of formattedMatches) {
-          const spacingWidth = popupWidth - fm.leftW - fm.rightW - 4;
-          const spacing = " ".repeat(Math.max(1, spacingWidth));
-          const rightPadding = "    ";
+          const columnSpacing = Math.max(1, commandColumnWidth - fm.leftW);
+          const bodyWidth = fm.leftW + columnSpacing + fm.rightW;
+          const tailPadding = " ".repeat(Math.max(0, popupWidth - bodyWidth));
 
           const formattedLine = fm.isSelected
-            ? morandi.accent(fm.leftPart + spacing) + morandi.dim(fm.rightPart) + rightPadding
-            : morandi.gray(fm.leftPart + spacing) + morandi.dim(fm.rightPart) + rightPadding;
+            ? morandi.accent(fm.leftPart) +
+              " ".repeat(columnSpacing) +
+              morandi.gray(fm.rightPart) +
+              tailPadding
+            : morandi.gray(fm.leftPart) +
+              " ".repeat(columnSpacing) +
+              morandi.dim(fm.rightPart) +
+              tailPadding;
 
           bottomLines.push(
             morandi.gray("  │") + formattedLine + morandi.gray("│"),
           );
         }
-        const footerText = isZh
-          ? "↑/↓ 选择  Enter 执行  Tab 补全  Esc 关闭"
-          : "↑/↓ select  Enter run  Tab complete  Esc close";
+        const footerText = getSlashSuggestionFooterText(isZh, matches.length);
         const footerW = this.getStringWidth(footerText);
-        const footerPadding = " ".repeat(
-          Math.max(0, popupWidth - footerW - 1),
-        );
+        const footerPadding = " ".repeat(Math.max(0, popupWidth - footerW - 1));
         bottomLines.push(
           morandi.gray("  │ ") +
             morandi.dim(footerText + footerPadding) +
             morandi.gray("│"),
         );
         bottomLines.push(morandi.gray("  ╰" + "─".repeat(popupWidth) + "╯"));
-
+      } else if (
+        this.inputBuffer.startsWith("/") &&
+        !this.hideAutocomplete &&
+        this.inputBuffer.trim().length > 1
+      ) {
+        const isZh = this.config?.language === "zh";
+        const popupWidth = Math.min(72, Math.max(30, columns - 8));
+        const message = isZh
+          ? "没有匹配的命令或候选项"
+          : "No matching command or candidate";
+        const hint = isZh
+          ? "Esc 关闭建议 · Ctrl+P 重新打开命令面板"
+          : "Esc closes suggestions · Ctrl+P reopens command palette";
+        const messageText = this.truncatePlainToWidth(
+          message,
+          Math.max(8, popupWidth - 2),
+        );
+        const hintText = this.truncatePlainToWidth(
+          hint,
+          Math.max(8, popupWidth - 2),
+        );
+        bottomLines.push(morandi.gray("  ╭" + "─".repeat(popupWidth) + "╮"));
+        bottomLines.push(
+          morandi.gray("  │ ") +
+            morandi.warn(messageText) +
+            " ".repeat(
+              Math.max(0, popupWidth - this.getStringWidth(messageText) - 1),
+            ) +
+            morandi.gray("│"),
+        );
+        bottomLines.push(
+          morandi.gray("  │ ") +
+            morandi.dim(hintText) +
+            " ".repeat(
+              Math.max(0, popupWidth - this.getStringWidth(hintText) - 1),
+            ) +
+            morandi.gray("│"),
+        );
+        bottomLines.push(morandi.gray("  ╰" + "─".repeat(popupWidth) + "╯"));
       }
     }
 
@@ -1874,23 +2949,36 @@ export class FullscreenTui {
     bottomLines.push(...boxContentLines);
 
     // A.4 构建底部状态行
+    const languageIsZh = this.config?.language === "zh";
     const mode = this.permissionsMode.toUpperCase();
 
     let statusText = "";
     if (this.historyScrollOffset > 0) {
       const newOutput = this.hasNewOutputWhileScrolled
-        ? this.config?.language === "zh"
+        ? languageIsZh
           ? " · 有新输出"
           : " · new output"
         : "";
       statusText =
         morandi.accent(
-          this.config?.language === "zh"
+          languageIsZh
             ? `↑ 历史 ${this.historyScrollOffset} 行`
             : `↑ history ${this.historyScrollOffset} lines`,
         ) + morandi.warn(newOutput);
     } else if (this.ctrlCPressedOnce) {
-      statusText = morandi.warn("Press Ctrl+C again to exit");
+      statusText = morandi.warn(
+        languageIsZh ? "再次按 Ctrl+C 退出" : "Press Ctrl+C again to exit",
+      );
+    } else if (this.historySearchQuery !== null) {
+      const query = this.historySearchQuery || "*";
+      statusText =
+        morandi.accent("Ctrl+R") +
+        morandi.gray("  ·  ") +
+        morandi.white(
+          languageIsZh
+            ? `历史搜索: ${this.truncatePlainToWidth(query, 28)}`
+            : `history search: ${this.truncatePlainToWidth(query, 28)}`,
+        );
     } else {
       const displayedModel = this.activeModelName || this.modelNameGetter();
       const cleanModel = displayedModel.split("/").pop() || displayedModel;
@@ -1898,7 +2986,7 @@ export class FullscreenTui {
       statusText =
         morandi.completed("●") +
         " " +
-        morandi.white(`${mode} MODE`) +
+        morandi.white(languageIsZh ? `${mode} 模式` : `${mode} MODE`) +
         morandi.gray("  ·  ") +
         morandi.accent(cleanModel) +
         morandi.gray("  ·  ") +
@@ -1910,22 +2998,39 @@ export class FullscreenTui {
     let keybindings =
       this.historyScrollOffset > 0
         ? morandi.gray("[End]") +
-          morandi.dim(this.config?.language === "zh" ? " 返回底部" : " Bottom")
+          morandi.dim(languageIsZh ? " 返回底部" : " Bottom")
         : columns >= 88
           ? [
-              morandi.gray("[^C]") + morandi.dim(" Cancel"),
-              morandi.gray("[^L]") + morandi.dim(" Clear"),
-              morandi.gray("[^P]") + morandi.dim(" Cmds"),
+              morandi.gray("[^C]") +
+                morandi.dim(languageIsZh ? " 取消" : " Cancel"),
+              morandi.gray("[^J]") +
+                morandi.dim(languageIsZh ? " 换行" : " Newline"),
+              morandi.gray("[^R]") +
+                morandi.dim(languageIsZh ? " 历史" : " History"),
+              morandi.gray("[^L]") +
+                morandi.dim(languageIsZh ? " 清屏" : " Clear"),
+              morandi.gray("[^P]") +
+                morandi.dim(languageIsZh ? " 命令" : " Cmds"),
             ].join("  ")
           : columns >= 62
             ? [
-                morandi.gray("[^C]") + morandi.dim(" Cancel"),
-                morandi.gray("[^P]") + morandi.dim(" Cmds"),
+                morandi.gray("[^C]") +
+                  morandi.dim(languageIsZh ? " 取消" : " Cancel"),
+                morandi.gray("[^P]") +
+                  morandi.dim(languageIsZh ? " 命令" : " Cmds"),
               ].join("  ")
-            : morandi.gray("[^C]") + morandi.dim(" Exit");
+            : morandi.gray("[^C]") +
+              morandi.dim(languageIsZh ? " 退出" : " Exit");
 
     let statusTextLength = this.getStringWidth(statusText);
     let keybindingsLength = this.getStringWidth(keybindings);
+    if (statusTextLength + keybindingsLength > columns - 8) {
+      keybindings = [
+        morandi.gray("[^C]") + morandi.dim(languageIsZh ? " 取消" : " Cancel"),
+        morandi.gray("[^P]") + morandi.dim(languageIsZh ? " 命令" : " Cmds"),
+      ].join("  ");
+      keybindingsLength = this.getStringWidth(keybindings);
+    }
     if (statusTextLength + keybindingsLength > columns - 8) {
       const compactMode = `${mode.slice(0, 6)} · ${this.currentAttempt || 1}`;
       statusText = morandi.completed("●") + " " + morandi.white(compactMode);
@@ -2043,13 +3148,23 @@ export class FullscreenTui {
     const cacheInput = this.cacheTelemetry
       ? this.cacheTelemetry.inputTokens || this.totalInputTokens
       : this.totalInputTokens;
-    const cacheMiss = this.cacheTelemetry?.missTokens || Math.max(0, cacheInput - cacheRead);
+    const cacheMiss =
+      this.cacheTelemetry?.missTokens || Math.max(0, cacheInput - cacheRead);
     const slabLabel = this.cacheTelemetry
       ? ` slab:${this.cacheTelemetry.slabHash.slice(0, 8)}`
       : "";
     const primerLabel = this.cacheTelemetry?.primed ? " primed" : "";
-    const cachePrefix = this.cacheTelemetry?.degraded ? "[cache ⚠]" : "[cache]";
-    let cacheText = `${cachePrefix} hit: ${hitRate.toFixed(0)}% (${(cacheRead / 1000).toFixed(0)}k hit/${(cacheMiss / 1000).toFixed(0)}k miss)${slabLabel}${primerLabel}`;
+    const cachePrefix = this.cacheTelemetry?.degraded
+      ? languageIsZh
+        ? "[缓存!]"
+        : "[cache!]"
+      : languageIsZh
+        ? "[缓存]"
+        : "[cache]";
+    let cacheText =
+      cacheInput <= 0
+        ? `${cachePrefix} ${this.cacheTelemetry?.primed ? (languageIsZh ? "已预热" : "primed") : languageIsZh ? "待命" : "idle"}${slabLabel}`
+        : `${cachePrefix} ${languageIsZh ? "命中" : "hit"}: ${hitRate.toFixed(0)}% (${(cacheRead / 1000).toFixed(0)}k ${languageIsZh ? "命中" : "hit"}/${(cacheMiss / 1000).toFixed(0)}k ${languageIsZh ? "未命中" : "miss"})${slabLabel}${primerLabel}`;
     if (this.getStringWidth(cacheText) > availableWidth) {
       cacheText = `${cachePrefix} ${hitRate.toFixed(0)}% (${(cacheRead / 1000).toFixed(0)}k/${(cacheInput / 1000).toFixed(0)}k)${slabLabel}`;
     }
@@ -2091,13 +3206,15 @@ export class FullscreenTui {
         }
         currentTurn = { user: msg, system: [] };
       } else if (msg.role === "assistant") {
-        if (currentTurn) {
-          currentTurn.assistant = msg;
+        if (!currentTurn) {
+          currentTurn = { system: [] };
         }
+        currentTurn.assistant = msg;
       } else if (msg.role === "system") {
-        if (currentTurn) {
-          currentTurn.system.push(msg);
+        if (!currentTurn) {
+          currentTurn = { system: [] };
         }
+        currentTurn.system.push(msg);
       }
     }
     if (currentTurn) {
@@ -2111,51 +3228,30 @@ export class FullscreenTui {
     const aBorder = "    ";
 
     for (const turn of turns) {
-      // Render User Turn
-      renderedLines.push("    " + morandi.userBold("👤 User"));
-      renderedLines.push(uBorder);
+      if (turn.user) {
+        // Render User Turn
+        renderedLines.push("    " + morandi.userBold("👤 User"));
+        renderedLines.push(uBorder);
 
-      const userLines = turn.user.text.split("\n");
-      const wrappedUserLines: string[] = [];
-      for (const line of userLines) {
-        wrappedUserLines.push(...this.wrapLine(line, columns - 10));
+        const userLines = turn.user.text.split("\n");
+        const wrappedUserLines: string[] = [];
+        for (const line of userLines) {
+          wrappedUserLines.push(...this.wrapLine(line, columns - 10));
+        }
+        for (const line of wrappedUserLines) {
+          renderedLines.push(uBorder + morandi.user(line));
+        }
+        renderedLines.push(uBorder);
+        renderedLines.push(""); // spacing
       }
-      for (const line of wrappedUserLines) {
-        renderedLines.push(uBorder + morandi.user(line));
-      }
-      renderedLines.push(uBorder);
-      renderedLines.push(""); // spacing
 
       // Render Assistant Turn
       if (turn.assistant) {
         const asstLines: string[] = [];
-        const systemLines: string[] = [];
-
-        for (const sys of turn.system) {
-          let text = sys.text.trim();
-          if (
-            text.startsWith("✓ Success") ||
-            text.startsWith("✖ Failed") ||
-            text.startsWith("✔ Success")
-          ) {
-            continue;
-          }
-          if (text.startsWith("✔")) {
-            text =
-              morandi.completed("completed") + morandi.gray(text.substring(1));
-          } else if (text.startsWith("✖")) {
-            text = morandi.failed("failed") + morandi.gray(text.substring(1));
-          } else if (text.startsWith("●")) {
-            text = morandi.cyan("●") + morandi.gray(text.substring(1));
-          } else if (text.startsWith("✦")) {
-            text = morandi.cyan("✦") + morandi.gray(text.substring(1));
-          } else if (text.startsWith("⚠")) {
-            text = morandi.warn("⚠") + morandi.gray(text.substring(1));
-          } else {
-            text = morandi.cyan("✦") + " " + morandi.gray(text);
-          }
-          systemLines.push(text);
-        }
+        const systemLines = this.formatSystemLinesForDisplay(turn.system, {
+          prefixUnknown: true,
+          preserveBlank: false,
+        });
 
         const isThinkingNow = turn.assistant === lastAsst && this.isThinking;
         const thoughtTimeVal = isThinkingNow
@@ -2270,6 +3366,21 @@ export class FullscreenTui {
           renderedLines.push(aBorder + line);
         }
         renderedLines.push(aBorder);
+        renderedLines.push("");
+      } else if (turn.system.length > 0) {
+        // Render System Lines (Command Outputs/Status/Help) directly!
+        const systemLines = this.formatSystemLinesForDisplay(turn.system, {
+          prefixUnknown: false,
+          preserveBlank: true,
+        });
+
+        const wrappedSysLines: string[] = [];
+        for (const line of systemLines) {
+          wrappedSysLines.push(...this.wrapLine(line, columns - 10));
+        }
+        for (const line of wrappedSysLines) {
+          renderedLines.push("    " + line);
+        }
         renderedLines.push("");
       }
     }
@@ -2450,22 +3561,8 @@ export class FullscreenTui {
     if (canIncremental) {
       // 局部增量重绘
       let cursorSequence = "";
-      let tempLen = 0;
-      let cursorLineIndex = 0;
-      let xOffset = 0;
-      for (let i = 0; i < wrappedLines.length; i++) {
-        const line = wrappedLines[i];
-        if (
-          this.cursorPosition >= tempLen &&
-          this.cursorPosition <= tempLen + line.length
-        ) {
-          cursorLineIndex = i;
-          const subStr = line.substring(0, this.cursorPosition - tempLen);
-          xOffset = this.getStringWidth(subStr);
-          break;
-        }
-        tempLen += line.length;
-      }
+      const { lineIndex: cursorLineIndex, xOffset } =
+        this.getCursorPositionInWrappedInput(wrappedInputLines);
       // Use pre-calculated constant for the input prefix width instead of recomputing
       const lineStartX = cursorLineIndex === 0 ? INPUT_PREFIX_WIDTH : 12;
       const targetX = lineStartX + xOffset;
@@ -2496,22 +3593,8 @@ export class FullscreenTui {
     // 7. 相对光标精确定位与原子打包输出
     let cursorSequence = "";
     if (this.resolveInput || this.thinkingKeypressListener !== null) {
-      let tempLen = 0;
-      let cursorLineIndex = 0;
-      let xOffset = 0;
-      for (let i = 0; i < wrappedLines.length; i++) {
-        const line = wrappedLines[i];
-        if (
-          this.cursorPosition >= tempLen &&
-          this.cursorPosition <= tempLen + line.length
-        ) {
-          cursorLineIndex = i;
-          const subStr = line.substring(0, this.cursorPosition - tempLen);
-          xOffset = this.getStringWidth(subStr);
-          break;
-        }
-        tempLen += line.length;
-      }
+      const { lineIndex: cursorLineIndex, xOffset } =
+        this.getCursorPositionInWrappedInput(wrappedInputLines);
       const lineStartX = cursorLineIndex === 0 ? INPUT_PREFIX_WIDTH : 12;
       const targetX = lineStartX + xOffset;
       const linesUp = formattedLines.length - cursorLineIndex + 1; // 距离状态行向上数 linesUp 行
@@ -2611,7 +3694,6 @@ export class FullscreenTui {
         continue;
       }
 
-
       const code = line.codePointAt(i);
       let charLen = 1;
       if (code && code > 0xffff) {
@@ -2687,6 +3769,47 @@ export class FullscreenTui {
     if (currentLine || lines.length === 0) {
       lines.push(currentLine);
     }
+    return lines;
+  }
+
+  private wrapInputText(str: string, maxWidth: number): WrappedInputLine[] {
+    const lines: WrappedInputLine[] = [];
+    let currentLine = "";
+    let currentWidth = 0;
+    let currentStart = 0;
+
+    for (let i = 0; i < str.length; ) {
+      const code = str.codePointAt(i);
+      if (!code) {
+        i++;
+        continue;
+      }
+
+      if (code === 10) {
+        lines.push({ text: currentLine, start: currentStart, end: i });
+        i++;
+        currentLine = "";
+        currentWidth = 0;
+        currentStart = i;
+        continue;
+      }
+
+      const charLen = code > 0xffff ? 2 : 1;
+      const char = str.substring(i, i + charLen);
+      const charWidth = this.isFullWidth(code) ? 2 : 1;
+      if (currentLine && currentWidth + charWidth > maxWidth) {
+        lines.push({ text: currentLine, start: currentStart, end: i });
+        currentLine = "";
+        currentWidth = 0;
+        currentStart = i;
+      }
+
+      currentLine += char;
+      currentWidth += charWidth;
+      i += charLen;
+    }
+
+    lines.push({ text: currentLine, start: currentStart, end: str.length });
     return lines;
   }
 

@@ -3,6 +3,7 @@ import {
   ModelChatInput,
   ModelEvent,
   ModelCapabilities,
+  ProviderRuntimeOptions,
 } from "../types.js";
 import { zodToJsonSchema, fetchWithRetry } from "../utils.js";
 
@@ -122,14 +123,25 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
   constructor(
     private apiKey?: string,
     private baseUrl = "https://api.deepseek.com",
+    private options: ProviderRuntimeOptions = {},
   ) {
-    this.preheat();
+    if (options.id) {
+      this.id = options.id;
+    }
+    if (!options.disablePreheat) {
+      this.preheat();
+    }
   }
 
   private preheat() {
     try {
       if (this.baseUrl && typeof fetch === "function") {
-        fetch(this.baseUrl, { method: "HEAD" }).catch(() => {});
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 1000);
+        timeout.unref?.();
+        fetch(this.baseUrl, { method: "HEAD", signal: controller.signal })
+          .catch(() => {})
+          .finally(() => clearTimeout(timeout));
       }
     } catch {
       // Ignored
@@ -137,11 +149,78 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
   }
 
   private getEndpointUrl(path: string): string {
-    const base = this.baseUrl.endsWith("/") ? this.baseUrl.slice(0, -1) : this.baseUrl;
+    const base = this.baseUrl.endsWith("/")
+      ? this.baseUrl.slice(0, -1)
+      : this.baseUrl;
     if (base.endsWith("/v1") && path.startsWith("/v1/")) {
       return `${base}${path.substring(3)}`;
     }
     return `${base}${path}`;
+  }
+
+  private getDefaultApiKeyEnv(): string {
+    if (this.options.apiKeyEnv) {
+      return this.options.apiKeyEnv;
+    }
+    if (this.type === "openai" || this.id === "openai") {
+      return "OPENAI_API_KEY";
+    }
+    return "DEEPSEEK_API_KEY";
+  }
+
+  private resolveApiKey(): string | undefined {
+    if (this.apiKey === "ollama-no-key") {
+      return undefined;
+    }
+    return (
+      this.apiKey ||
+      (this.options.apiKeyEnv
+        ? process.env[this.options.apiKeyEnv]
+        : undefined) ||
+      process.env[this.getDefaultApiKeyEnv()]
+    );
+  }
+
+  private buildJsonHeaders(key?: string): Record<string, string> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (key) {
+      const authHeader = this.options.apiKeyHeader || "Authorization";
+      const prefix = this.options.apiKeyPrefix ?? "Bearer";
+      headers[authHeader] = prefix
+        ? `${prefix}${prefix.endsWith(" ") ? "" : " "}${key}`
+        : key;
+    }
+    return { ...headers, ...(this.options.headers || {}) };
+  }
+
+  private getModelCapabilityOverride(
+    model: string,
+  ): Partial<ModelCapabilities> | undefined {
+    const overrides = this.options.modelCapabilities || {};
+    const normalizedModel = model.toLowerCase();
+    for (const [pattern, caps] of Object.entries(overrides)) {
+      const normalizedPattern = pattern.toLowerCase();
+      if (normalizedPattern === normalizedModel) {
+        return caps;
+      }
+      if (
+        normalizedPattern.includes("*") &&
+        this.matchesWildcard(normalizedModel, normalizedPattern)
+      ) {
+        return caps;
+      }
+    }
+    return undefined;
+  }
+
+  private matchesWildcard(value: string, pattern: string): boolean {
+    const escaped = pattern
+      .split("*")
+      .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+      .join(".*");
+    return new RegExp(`^${escaped}$`).test(value);
   }
 
   public getModelCapabilities(model: string): ModelCapabilities {
@@ -153,7 +232,12 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
 
     const isOpenAIReasoner =
       this.id === "openai" &&
-      (lowercase.startsWith("o1") || lowercase.startsWith("o3"));
+      (/^o\d/.test(lowercase) ||
+        lowercase.includes("reasoning") ||
+        lowercase.includes("gpt-5"));
+    const isLegacyNonStreamingOpenAIReasoner =
+      this.id === "openai" &&
+      (lowercase.startsWith("o1") || lowercase.includes("o1-"));
 
     const isOfficialDeepSeek = this.baseUrl.includes("api.deepseek.com");
     const supportsNativeTools = !(
@@ -162,24 +246,33 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
       lowercase.includes("o1-mini")
     );
 
-    return {
-      streaming: !isOpenAIReasoner,
+    const inferred: ModelCapabilities = {
+      streaming: !isLegacyNonStreamingOpenAIReasoner,
       toolCalls: supportsNativeTools,
       jsonMode: !isReasoner,
       thinking: isReasoner || isOpenAIReasoner,
-      vision: lowercase.includes("vision") || lowercase.includes("gpt-4o") || lowercase.includes("claude-3"),
+      vision:
+        lowercase.includes("vision") ||
+        lowercase.includes("gpt-4o") ||
+        lowercase.includes("claude-3"),
       promptCaching: true,
+    };
+    return {
+      ...inferred,
+      ...(this.options.capabilities || {}),
+      ...(this.getModelCapabilityOverride(model) || {}),
     };
   }
 
   async *chat(input: ModelChatInput): AsyncIterable<ModelEvent> {
     const thinkParser = new StreamingThinkParser();
-    const key = this.apiKey || process.env.DEEPSEEK_API_KEY;
-    if (!key) {
+    const key = this.resolveApiKey();
+    if (!key && this.apiKey !== "ollama-no-key") {
+      const keyEnv = this.getDefaultApiKeyEnv();
       yield {
         type: "error",
         error: new Error(
-          "API key missing for deepseek-openai provider. Please set DEEPSEEK_API_KEY.",
+          `API key missing for ${this.id} provider. Please set ${keyEnv}.`,
         ),
       };
       return;
@@ -197,7 +290,10 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
             return {
               role: "tool" as const,
               tool_call_id: trData.toolCallId,
-              content: typeof trData.content === "string" ? trData.content : JSON.stringify(trData.content),
+              content:
+                typeof trData.content === "string"
+                  ? trData.content
+                  : JSON.stringify(trData.content),
             };
           });
         }
@@ -276,13 +372,19 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
     });
 
     const capabilities = this.getModelCapabilities(input.model);
-    const isReasoner = capabilities.thinking && !input.model.toLowerCase().startsWith("o");
-    const isOpenAIReasoner = capabilities.thinking && input.model.toLowerCase().startsWith("o");
+    const modelLowercase = input.model.toLowerCase();
+    const isOpenAIReasoner =
+      this.id === "openai" &&
+      capabilities.thinking &&
+      (/^o\d/.test(modelLowercase) ||
+        modelLowercase.includes("reasoning") ||
+        modelLowercase.includes("gpt-5"));
+    const isReasoner = capabilities.thinking && !isOpenAIReasoner;
 
     const body: any = {
       model: input.model,
       messages: openaiMessages,
-      stream: input.stream !== false,
+      stream: input.stream !== false && capabilities.streaming,
     };
 
     if (input.userId) {
@@ -293,7 +395,8 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
       body.max_completion_tokens = input.maxTokens;
       if (input.thinking?.enabled) {
         const budget = input.thinking.budgetTokens || 1024;
-        body.reasoning_effort = budget > 1500 ? "high" : budget > 500 ? "medium" : "low";
+        body.reasoning_effort =
+          budget > 1500 ? "high" : budget > 500 ? "medium" : "low";
       }
     } else {
       body.max_tokens = input.maxTokens;
@@ -305,8 +408,8 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
           type: "enabled",
           budget_tokens: input.thinking.budgetTokens || 1024,
         };
+        body.temperature = 1.0;
       }
-      body.temperature = 1.0;
     } else if (isReasoner) {
       body.temperature = 1.0;
     } else {
@@ -330,6 +433,9 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
     if (input.responseFormat === "json") {
       body.response_format = { type: "json_object" };
     }
+    if (this.options.extraBody) {
+      Object.assign(body, this.options.extraBody);
+    }
 
     const chatController = new AbortController();
     const chatSignal = chatController.signal;
@@ -340,24 +446,34 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
 
     if (input.abortSignal) {
       if (input.abortSignal.aborted) {
-        throw input.abortSignal.reason || new DOMException("The user aborted a request.", "AbortError");
+        throw (
+          input.abortSignal.reason ||
+          new DOMException("The user aborted a request.", "AbortError")
+        );
       }
       input.abortSignal.addEventListener("abort", onExternalAbort);
     }
 
-    const response = await fetchWithRetry(
-      this.getEndpointUrl("/v1/chat/completions"),
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${key}`,
+    let response: Response;
+    try {
+      response = await fetchWithRetry(
+        this.getEndpointUrl("/v1/chat/completions"),
+        {
+          method: "POST",
+          headers: this.buildJsonHeaders(key),
+          body: JSON.stringify(body),
+          signal: chatSignal,
+          timeout: this.options.requestTimeoutMs,
         },
-        body: JSON.stringify(body),
-        signal: chatSignal,
-        keepalive: true,
-      },
-    );
+        this.options.maxRetries ?? 2,
+      );
+    } catch (err) {
+      if (input.abortSignal) {
+        input.abortSignal.removeEventListener("abort", onExternalAbort);
+      }
+      yield { type: "error", error: err };
+      return;
+    }
 
     if (!response.ok) {
       const errText = await response.text();
@@ -365,6 +481,9 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
         type: "error",
         error: new Error(`HTTP ${response.status}: ${errText}`),
       };
+      if (input.abortSignal) {
+        input.abortSignal.removeEventListener("abort", onExternalAbort);
+      }
       return;
     }
 
@@ -432,12 +551,17 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
     let cacheWriteTokens = 0;
 
     let streamTimeoutId: NodeJS.Timeout | undefined;
-    const streamTimeoutMs = 60000;
+    const streamTimeoutMs = this.options.streamTimeoutMs ?? 60000;
 
     const resetStreamTimeout = () => {
       if (streamTimeoutId) clearTimeout(streamTimeoutId);
       streamTimeoutId = setTimeout(() => {
-        chatController.abort(new DOMException("Stream reading timed out after 60 seconds of inactivity.", "TimeoutError"));
+        chatController.abort(
+          new DOMException(
+            `Stream reading timed out after ${Math.round(streamTimeoutMs / 1000)} seconds of inactivity.`,
+            "TimeoutError",
+          ),
+        );
       }, streamTimeoutMs);
     };
 
@@ -462,8 +586,8 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
           const trimmed = line.trim();
           if (!trimmed) continue;
 
-          if (trimmed.startsWith("data: ")) {
-            const rawData = trimmed.substring(6);
+          if (trimmed.startsWith("data:")) {
+            const rawData = trimmed.substring(5).trimStart();
             if (rawData === "[DONE]") continue;
             try {
               const parsed = JSON.parse(rawData);
@@ -581,26 +705,28 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
     texts: string[],
     options?: { model?: string },
   ): Promise<number[][]> {
-    const key = this.apiKey || process.env.DEEPSEEK_API_KEY;
+    const key = this.resolveApiKey();
     if (!key) {
       throw new Error(
-        "API key missing for embedding provider. Please set DEEPSEEK_API_KEY.",
+        `API key missing for embedding provider. Please set ${this.getDefaultApiKeyEnv()}.`,
       );
     }
 
     const model = options?.model || "text-embedding-3-small";
 
-    const response = await fetchWithRetry(this.getEndpointUrl("/v1/embeddings"), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`,
+    const response = await fetchWithRetry(
+      this.getEndpointUrl("/v1/embeddings"),
+      {
+        method: "POST",
+        headers: this.buildJsonHeaders(key),
+        body: JSON.stringify({
+          input: texts,
+          model: model,
+        }),
+        timeout: this.options.requestTimeoutMs,
       },
-      body: JSON.stringify({
-        input: texts,
-        model: model,
-      }),
-    });
+      this.options.maxRetries ?? 2,
+    );
 
     if (!response.ok) {
       const errText = await response.text();
@@ -631,13 +757,8 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
       abortSignal?: AbortSignal;
     },
   ): Promise<string> {
-    const key = this.apiKey || process.env.DEEPSEEK_API_KEY;
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (key && key !== "ollama-no-key") {
-      headers["Authorization"] = `Bearer ${key}`;
-    }
+    const key = this.resolveApiKey();
+    const headers = this.buildJsonHeaders(key);
 
     const isOfficialDeepSeek = this.baseUrl.includes("api.deepseek.com");
     let url = this.getEndpointUrl("/v1/completions");
@@ -651,24 +772,37 @@ export class DeepSeekOpenAIProvider implements ModelProvider {
 
     if (isOfficialDeepSeek) {
       // Official DeepSeek API FIM endpoint is under /beta/v1/completions
-      const betaBase = this.baseUrl.endsWith("/") ? this.baseUrl.slice(0, -1) : this.baseUrl;
-      url = betaBase.includes("/beta") ? `${betaBase}/v1/completions` : `${betaBase}/beta/v1/completions`;
+      const betaBase = this.baseUrl.endsWith("/")
+        ? this.baseUrl.slice(0, -1)
+        : this.baseUrl;
+      url = betaBase.includes("/beta")
+        ? `${betaBase}/v1/completions`
+        : `${betaBase}/beta/v1/completions`;
 
       if (options?.suffix !== undefined) {
         bodyData.prompt = prompt;
         bodyData.suffix = options.suffix;
       }
-      if (!options?.model || options.model.includes("qwen") || options.model === "deepseek-chat") {
+      if (
+        !options?.model ||
+        options.model.includes("qwen") ||
+        options.model === "deepseek-chat"
+      ) {
         bodyData.model = "deepseek-v4-flash";
       }
     }
 
-    const response = await fetchWithRetry(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(bodyData),
-      signal: options?.abortSignal,
-    });
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(bodyData),
+        signal: options?.abortSignal,
+        timeout: this.options.requestTimeoutMs,
+      },
+      this.options.maxRetries ?? 2,
+    );
 
     if (!response.ok) {
       const errText = await response.text();

@@ -1,9 +1,11 @@
 import { z } from "zod";
 import { ToolRisk } from "@orbit-build/shared";
+import type { OrbitConfig } from "@orbit-build/config";
 
 export interface ToolContext {
   cwd: string;
   sessionId: string;
+  config?: OrbitConfig;
   logger?: any;
   abortSignal?: AbortSignal;
 }

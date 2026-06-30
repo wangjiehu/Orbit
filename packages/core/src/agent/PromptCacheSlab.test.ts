@@ -23,6 +23,21 @@ describe("PromptCacheSlabBuilder", () => {
         files: {},
       },
       projectInstructions: "Always preserve workspace boundaries.",
+      skillsIndex: [
+        {
+          name: "api-tuning",
+          description: "Optimize provider throughput",
+          path: ".orbit/skills/api-tuning/SKILL.md",
+        },
+      ],
+      activeSkills: [
+        {
+          name: "api-tuning",
+          description: "Optimize provider throughput",
+          path: ".orbit/skills/api-tuning/SKILL.md",
+          content: "Volatile skill body for this turn",
+        },
+      ],
       relevantFiles: [
         {
           path: "src/dynamic.ts",
@@ -59,8 +74,12 @@ describe("PromptCacheSlabBuilder", () => {
 
     expect(first.hash).toBe(second.hash);
     expect(first.text).toContain("Always preserve workspace boundaries.");
+    expect(first.text).toContain("api-tuning - Optimize provider throughput");
+    expect(first.text).not.toContain("Volatile skill body");
     expect(first.text).toContain("Repo map A");
     expect(first.text).toContain("<!-- VOLATILE_CONTEXT -->");
+    expect(first.text).not.toContain("### Runtime Context");
+    expect(first.text).not.toContain("Current local date");
     expect(first.text).not.toContain("RAG result one");
     expect(first.text).not.toContain("console.log(Date.now())");
     expect(fs.existsSync(first.path)).toBe(true);

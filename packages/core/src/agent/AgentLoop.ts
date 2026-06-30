@@ -18,10 +18,7 @@ import { StatusBar, Prompt, Renderer } from "@orbit-build/tui";
 import { AgentState, createInitialState } from "./AgentState.js";
 import { z } from "zod";
 import { MessageBuilder } from "./MessageBuilder.js";
-import {
-  PromptCacheSlab,
-  PromptCacheSlabBuilder,
-} from "./PromptCacheSlab.js";
+import { PromptCacheSlab, PromptCacheSlabBuilder } from "./PromptCacheSlab.js";
 import { StepRunner } from "./StepRunner.js";
 import { Planner } from "./Planner.js";
 import { eventBus } from "../events/EventBus.js";
@@ -39,6 +36,9 @@ import { VerificationContractManager } from "../verification/VerificationContrac
 const DEEPSEEK_CACHE_PRIMER_ROUNDS = 2;
 const DEEPSEEK_CACHE_PRIMER_TTL_MS = 240000;
 const DEEPSEEK_CACHE_REPAIR_HIT_RATE = 0.85;
+const DEEPSEEK_FLASH_CACHE_PRIMER_LATENCY_BUDGET_MS = 800;
+const DEEPSEEK_REASONING_CACHE_PRIMER_LATENCY_BUDGET_MS = 1500;
+const DEEPSEEK_VERBOSE_CACHE_ENV = "ORBIT_DEEPSEEK_VERBOSE_CACHE";
 
 export interface UserInteraction {
   askApproval(reason: string, preview?: string): Promise<boolean>;
@@ -73,6 +73,8 @@ export class AgentLoop {
   private cachedRepoMapTextForRun: string | null = null;
   private activeModelForRun: string | null = null;
   private primedCacheSlabs = new Set<string>();
+  private pendingCacheSlabs = new Set<string>();
+  private approvedToolScopes = new Set<string>();
   private userId: string;
   private keepaliveTimer: NodeJS.Timeout | null = null;
   private lastChatParams: {
@@ -92,6 +94,7 @@ export class AgentLoop {
       systemPromptOverride?: string;
       allowedTools?: string[];
       disableStatusBar?: boolean;
+      detachBackgroundCachePrimer?: boolean;
       sessionId?: string;
     },
   ) {
@@ -115,7 +118,11 @@ export class AgentLoop {
       this.totalCacheReadTokens = session.totalCacheReadTokens || 0;
     }
 
-    this.state = createInitialState(session.id, task);
+    this.state = createInitialState(
+      session.id,
+      task,
+      this.getMaxLoopAttempts(),
+    );
 
     if (options?.sessionId) {
       const savedHistory = this.sessionManager.getHistory();
@@ -137,7 +144,7 @@ export class AgentLoop {
     this.rollbackManager = new RollbackManager(cwd);
     this.permissionEngine = new PermissionEngine(config);
     this.contextBuilder = new ContextPackBuilder(cwd);
-    this.stepRunner = new StepRunner(cwd, session.id);
+    this.stepRunner = new StepRunner(cwd, session.id, config);
     this.verificationManager = new VerificationContractManager(
       cwd,
       session.id,
@@ -151,6 +158,31 @@ export class AgentLoop {
     }
   }
 
+  private getMaxLoopAttempts(): number {
+    const raw = (this.config as any).agent?.maxIterations;
+    if (!Number.isFinite(raw)) {
+      return 8;
+    }
+    return Math.max(1, Math.min(50, Math.floor(raw)));
+  }
+
+  private getRunawayPromptInterval(): number {
+    if (this.state.maxAttempts <= 10) {
+      return Number.POSITIVE_INFINITY;
+    }
+    return Math.max(10, Math.min(20, Math.floor(this.state.maxAttempts / 2)));
+  }
+
+  private getReusableApprovalScope(
+    toolName: string,
+    risk?: string,
+  ): string | null {
+    if (toolName === "web_search" && risk === "network") {
+      return "network:web_search";
+    }
+    return null;
+  }
+
   public async run(): Promise<void> {
     try {
       eventBus.emitEvent("agent_start", {
@@ -160,6 +192,7 @@ export class AgentLoop {
       this.cachedContextPack = null;
       this.cachedRepoMapTextForRun = null;
       this.activeModelForRun = null;
+      this.approvedToolScopes.clear();
       this.sessionManager.saveHistory(this.state.history);
 
       // Start workspace symbol indexing in the background asynchronously
@@ -281,7 +314,9 @@ export class AgentLoop {
           // Runaway Iteration Guard
           if (
             this.state.attemptCount > 1 &&
-            (this.state.attemptCount - 1) % 5 === 0
+            Number.isFinite(this.getRunawayPromptInterval()) &&
+            (this.state.attemptCount - 1) % this.getRunawayPromptInterval() ===
+              0
           ) {
             const continueExec = await this.interaction.askApproval(
               `Agent loop has run for ${this.state.attemptCount - 1} iterations. Continue executing to prevent runaway costs?`,
@@ -357,21 +392,86 @@ export class AgentLoop {
 
           // Heuristic task classification: High complexity vs Trivial
           const highComplexityKeywords = [
-            "debug", "investigate", "root cause", "why does", "race condition",
-            "architecture", "refactor", "migrate", "design", "tradeoff", "optimize",
-            "security", "vulnerability", "concurrency", "deadlock", "memory leak",
-            "reason", "think", "explain why", "diagnose", "trace", "why does",
-            "what's wrong", "compare", "evaluate", "assess", "decide", "choose",
-            "推理", "分析", "诊断", "调试", "设计", "评估", "原因", "为什么", "调查",
-            "死锁", "内存泄漏", "并发", "优化", "重构", "安全", "漏洞", "架构",
-            "异常", "报错", "崩溃", "故障"
+            "debug",
+            "investigate",
+            "root cause",
+            "why does",
+            "race condition",
+            "architecture",
+            "refactor",
+            "migrate",
+            "design",
+            "tradeoff",
+            "optimize",
+            "security",
+            "vulnerability",
+            "concurrency",
+            "deadlock",
+            "memory leak",
+            "reason",
+            "think",
+            "explain why",
+            "diagnose",
+            "trace",
+            "why does",
+            "what's wrong",
+            "compare",
+            "evaluate",
+            "assess",
+            "decide",
+            "choose",
+            "推理",
+            "分析",
+            "诊断",
+            "调试",
+            "设计",
+            "评估",
+            "原因",
+            "为什么",
+            "调查",
+            "死锁",
+            "内存泄漏",
+            "并发",
+            "优化",
+            "重构",
+            "安全",
+            "漏洞",
+            "架构",
+            "异常",
+            "报错",
+            "崩溃",
+            "故障",
           ];
 
           const trivialKeywords = [
-            "what is", "list", "show", "echo", "print", "rename", "lint", "format",
-            "ty", "thanks", "yes", "no", "ok", "continue", "search", "find",
-            "什么是", "列出", "显示", "输出", "打印", "重命名", "格式化", "谢谢",
-            "继续", "是", "否", "好的"
+            "what is",
+            "list",
+            "show",
+            "echo",
+            "print",
+            "rename",
+            "lint",
+            "format",
+            "ty",
+            "thanks",
+            "yes",
+            "no",
+            "ok",
+            "continue",
+            "search",
+            "find",
+            "什么是",
+            "列出",
+            "显示",
+            "输出",
+            "打印",
+            "重命名",
+            "格式化",
+            "谢谢",
+            "继续",
+            "是",
+            "否",
+            "好的",
           ];
 
           const isComplexTask =
@@ -448,6 +548,14 @@ export class AgentLoop {
             );
           }
           let toolDefs = toolRegistry.getDefinitions();
+          if (!this.config.tools.webSearch.enabled) {
+            toolDefs = toolDefs.filter((tool) => tool.name !== "web_search");
+          }
+          if (!this.config.tools.bash.enabled) {
+            toolDefs = toolDefs.filter(
+              (tool) => tool.name !== "bash" && tool.name !== "run_tests",
+            );
+          }
           if (this.options?.allowedTools) {
             toolDefs = toolDefs.filter((t) =>
               this.options!.allowedTools!.includes(t.name),
@@ -459,8 +567,8 @@ export class AgentLoop {
           // Stable slab: core rules + canonical tool prompt + repo profile/map.
           // Volatile suffix: RAG snippets, selected file excerpts, current history.
           const baseSystemPrompt =
-            (this.options?.systemPromptOverride ||
-              Planner.makeSystemPrompt(activeModel));
+            this.options?.systemPromptOverride ||
+            Planner.makeSystemPrompt(activeModel, this.config.language);
           const toolsPrompt = generateXMLToolsPrompt(toolDefs);
           const contextPack = this.cachedContextPack;
           const cacheSlab = PromptCacheSlabBuilder.build({
@@ -481,16 +589,20 @@ export class AgentLoop {
             contextPack,
           );
 
-          const capabilities = (typeof this.provider.getModelCapabilities === "function"
+          const capabilities = (typeof this.provider.getModelCapabilities ===
+          "function"
             ? this.provider.getModelCapabilities(activeModel)
             : this.provider?.capabilities) || {
-              streaming: true,
-              toolCalls: true,
-              jsonMode: true,
-              thinking: activeModel.toLowerCase().includes("reasoner") || activeModel.toLowerCase().includes("r1") || activeModel.toLowerCase().includes("v4-pro"),
-              vision: false,
-              promptCaching: true,
-            };
+            streaming: true,
+            toolCalls: true,
+            jsonMode: true,
+            thinking:
+              activeModel.toLowerCase().includes("reasoner") ||
+              activeModel.toLowerCase().includes("r1") ||
+              activeModel.toLowerCase().includes("v4-pro"),
+            vision: false,
+            promptCaching: true,
+          };
 
           const isReasoner = capabilities.thinking;
 
@@ -617,7 +729,8 @@ export class AgentLoop {
                   cacheWriteTokens: finalUsage.cacheWriteTokens,
                 }
               : undefined,
-            toolCalls: toolCallsToExecute.length > 0 ? toolCallsToExecute : undefined,
+            toolCalls:
+              toolCallsToExecute.length > 0 ? toolCallsToExecute : undefined,
           });
 
           if (this.abortController?.signal.aborted) {
@@ -688,8 +801,11 @@ export class AgentLoop {
 
             if (hasEdits) {
               if (this.verificationManager.hasContract()) {
-                this.interaction.showText("\n● Verification: Running contract verification checks...");
-                const verifyResult = await this.verificationManager.runVerification();
+                this.interaction.showText(
+                  "\n● Verification: Running contract verification checks...",
+                );
+                const verifyResult =
+                  await this.verificationManager.runVerification();
                 if (!verifyResult.success) {
                   const repairAttempts = this.state.history.filter(
                     (m) =>
@@ -701,7 +817,10 @@ export class AgentLoop {
                       ),
                   ).length;
 
-                  if (repairAttempts >= 3 || !(this.config.context as any)?.autoRepair) {
+                  if (
+                    repairAttempts >= 3 ||
+                    !(this.config.context as any)?.autoRepair
+                  ) {
                     this.interaction.showText(
                       picocolors.red(
                         `\n✖ Verification Failed: Workspace violates contract. Rolling back all changes for safety...`,
@@ -780,7 +899,8 @@ export class AgentLoop {
                         `✖ Tests failed! Entering auto-repair loop (Attempt ${repairAttempts + 1}/3)...`,
                       ),
                     );
-                    const rawLog = result.error || (result as any).display || "";
+                    const rawLog =
+                      result.error || (result as any).display || "";
                     let errLog = cleanAndTruncateTestLog(rawLog);
 
                     // 3. Pre-Analysis Error Distillation via V4-Flash
@@ -856,7 +976,41 @@ ${errLog}`;
 
           const toolResultBlocks: OrbitContentBlock[] = [];
           for (const tc of toolCallsToExecute) {
-            let argSummary = tc.arguments;
+            let argSummary = "";
+            try {
+              const parsed = JSON.parse(tc.arguments);
+              if (
+                tc.name === "write_file" ||
+                tc.name === "edit_file" ||
+                tc.name === "replace_file_content"
+              ) {
+                argSummary =
+                  parsed.path ||
+                  parsed.TargetFile ||
+                  parsed.filePath ||
+                  parsed.file ||
+                  "";
+              } else if (tc.name === "multi_replace_file_content") {
+                argSummary = parsed.TargetFile || "";
+              } else if (tc.name === "read_file") {
+                argSummary = parsed.path || parsed.AbsolutePath || "";
+              } else if (tc.name === "bash") {
+                argSummary = parsed.command || parsed.CommandLine || "";
+              } else if (tc.name === "run_tests") {
+                argSummary = parsed.command || "";
+              } else if (tc.name === "grep") {
+                argSummary = `"${parsed.query || parsed.Query}" in ${parsed.path || parsed.SearchPath || ""}`;
+              } else if (tc.name === "glob") {
+                argSummary = `"${parsed.pattern || parsed.Pattern}" in ${parsed.path || parsed.DirectoryPath || ""}`;
+              } else if (tc.name === "web_search") {
+                argSummary = parsed.query || "";
+              } else {
+                argSummary = tc.arguments;
+              }
+            } catch {
+              argSummary = tc.arguments;
+            }
+
             if (argSummary.length > 80) {
               argSummary = argSummary.substring(0, 77) + "...";
             }
@@ -908,6 +1062,22 @@ ${errLog}`;
               }
             }
 
+            const reusableApprovalScope = this.getReusableApprovalScope(
+              tc.name,
+              decision.risk,
+            );
+            const reusedApproval =
+              decision.action === "ask" &&
+              reusableApprovalScope !== null &&
+              this.approvedToolScopes.has(reusableApprovalScope);
+            if (reusedApproval) {
+              decision = {
+                action: "allow",
+                reason: `Previously approved "${tc.name}" for this task.`,
+                risk: decision.risk,
+              };
+            }
+
             if (decision.action === "deny") {
               this.interaction.showText(`✖ Blocked: ${decision.reason}`);
               eventBus.emitEvent("tool_approval", {
@@ -943,86 +1113,96 @@ ${errLog}`;
             if (decision.action === "ask") {
               let approved = false;
               let currentArgs = tc.arguments;
-              while (true) {
-                const choice = await Prompt.askSelect(
-                  `Confirm execution of tool "${tc.name}"? Reason: ${decision.reason}`,
-                  [
-                    { value: "approve", label: "Approve execution" },
-                    { value: "edit", label: "Edit tool arguments" },
-                    { value: "deny", label: "Deny execution" },
-                  ],
+              if (reusableApprovalScope) {
+                approved = await Prompt.askApproval(
+                  `Allow "${tc.name}" for this task? ${argSummary ? `Query: ${argSummary}` : decision.reason}`,
                 );
-                if (choice === "approve") {
-                  approved = true;
-                  break;
-                } else if (choice === "edit") {
-                  let edited: string | null = null;
-                  const isObjectSchema =
-                    registeredTool?.inputSchema instanceof z.ZodObject;
+                if (approved) {
+                  this.approvedToolScopes.add(reusableApprovalScope);
+                }
+              } else {
+                while (true) {
+                  const choice = await Prompt.askSelect(
+                    `Confirm execution of tool "${tc.name}"? Reason: ${decision.reason}`,
+                    [
+                      { value: "approve", label: "Approve execution" },
+                      { value: "edit", label: "Edit tool arguments" },
+                      { value: "deny", label: "Deny execution" },
+                    ],
+                  );
+                  if (choice === "approve") {
+                    approved = true;
+                    break;
+                  } else if (choice === "edit") {
+                    let edited: string | null = null;
+                    const isObjectSchema =
+                      registeredTool?.inputSchema instanceof z.ZodObject;
 
-                  if (isObjectSchema) {
-                    const editChoice = await Prompt.askSelect(
-                      "Choose edit mode:",
-                      [
-                        {
-                          value: "form",
-                          label: "(Recommended) Interactive form fields editor",
-                        },
-                        { value: "json", label: "Raw JSON string editor" },
-                        { value: "cancel", label: "Cancel" },
-                      ],
-                    );
-                    if (editChoice === "form") {
-                      edited = await this.promptSchemaGuided(
-                        registeredTool,
-                        currentArgs,
+                    if (isObjectSchema) {
+                      const editChoice = await Prompt.askSelect(
+                        "Choose edit mode:",
+                        [
+                          {
+                            value: "form",
+                            label:
+                              "(Recommended) Interactive form fields editor",
+                          },
+                          { value: "json", label: "Raw JSON string editor" },
+                          { value: "cancel", label: "Cancel" },
+                        ],
                       );
-                    } else if (editChoice === "json") {
+                      if (editChoice === "form") {
+                        edited = await this.promptSchemaGuided(
+                          registeredTool,
+                          currentArgs,
+                        );
+                      } else if (editChoice === "json") {
+                        edited = await Prompt.askText(
+                          "Edit tool arguments (JSON string):",
+                          currentArgs,
+                        );
+                      }
+                    } else {
                       edited = await Prompt.askText(
                         "Edit tool arguments (JSON string):",
                         currentArgs,
                       );
                     }
-                  } else {
-                    edited = await Prompt.askText(
-                      "Edit tool arguments (JSON string):",
-                      currentArgs,
-                    );
-                  }
 
-                  if (edited === null) {
-                    continue;
-                  }
-                  try {
-                    const parsed = JSON.parse(edited);
-                    if (registeredTool && registeredTool.inputSchema) {
-                      const validation =
-                        registeredTool.inputSchema.safeParse(parsed);
-                      if (!validation.success) {
-                        const errorMsgs = validation.error.errors
-                          .map(
-                            (e) =>
-                              `${e.path.join(".") || "root"}: ${e.message}`,
-                          )
-                          .join(", ");
-                        this.interaction.showText(
-                          `✖ Schema validation failed: ${errorMsgs}`,
-                        );
-                        continue;
-                      }
+                    if (edited === null) {
+                      continue;
                     }
-                    currentArgs = edited;
-                    tc.arguments = edited;
-                    this.interaction.showText(`✔ Arguments updated.`);
-                    approved = true;
+                    try {
+                      const parsed = JSON.parse(edited);
+                      if (registeredTool && registeredTool.inputSchema) {
+                        const validation =
+                          registeredTool.inputSchema.safeParse(parsed);
+                        if (!validation.success) {
+                          const errorMsgs = validation.error.errors
+                            .map(
+                              (e) =>
+                                `${e.path.join(".") || "root"}: ${e.message}`,
+                            )
+                            .join(", ");
+                          this.interaction.showText(
+                            `✖ Schema validation failed: ${errorMsgs}`,
+                          );
+                          continue;
+                        }
+                      }
+                      currentArgs = edited;
+                      tc.arguments = edited;
+                      this.interaction.showText(`✔ Arguments updated.`);
+                      approved = true;
+                      break;
+                    } catch (err: any) {
+                      this.interaction.showText(
+                        `✖ Invalid JSON: ${err.message}. Please try again.`,
+                      );
+                    }
+                  } else {
                     break;
-                  } catch (err: any) {
-                    this.interaction.showText(
-                      `✖ Invalid JSON: ${err.message}. Please try again.`,
-                    );
                   }
-                } else {
-                  break;
                 }
               }
 
@@ -1067,7 +1247,9 @@ ${errLog}`;
               eventBus.emitEvent("tool_approval", {
                 toolCallId: tc.id,
                 approved: true,
-                reason: "Auto-approved by policy",
+                reason: reusedApproval
+                  ? "Approved by earlier user confirmation"
+                  : "Auto-approved by policy",
               });
             }
 
@@ -1141,7 +1323,8 @@ ${errLog}`;
                     eventBus.emitEvent("tool_result", {
                       toolCallId: tc.id,
                       toolName: tc.name,
-                      error: "Commit aborted by user due to pre-commit test failures.",
+                      error:
+                        "Commit aborted by user due to pre-commit test failures.",
                     });
                     toolResultBlocks.push({
                       type: "tool_result",
@@ -1936,7 +2119,9 @@ ${errLog}`;
               toolCallId: tc.id,
               toolName: tc.name,
               result: finalResult.ok ? finalResult.data : undefined,
-              error: finalResult.ok ? undefined : finalResult.error || "Unknown error",
+              error: finalResult.ok
+                ? undefined
+                : finalResult.error || "Unknown error",
             });
 
             toolResultBlocks.push({
@@ -1994,10 +2179,10 @@ ${errLog}`;
           this.interaction.showText(`\n● Auto-committing changes...`);
           try {
             const uniqueFiles = Array.from(new Set(modifiedFiles));
-            const { execSync } = await import("child_process");
+            const { execFileSync, execSync } = await import("child_process");
 
             for (const file of uniqueFiles) {
-              execSync(`git add "${file}"`, { cwd: this.cwd });
+              execFileSync("git", ["add", file], { cwd: this.cwd });
             }
 
             const diff = execSync("git diff --cached", { cwd: this.cwd })
@@ -2138,6 +2323,11 @@ ${errLog}`;
     this.cachedContextPack = null;
   }
 
+  public clearHistoryPublic() {
+    this.state.history = [];
+    this.sessionManager.saveHistory([]);
+  }
+
   public resumeSession(sessionId: string): boolean {
     const session = this.sessionManager.resumeSession(sessionId);
     if (!session) return false;
@@ -2161,7 +2351,7 @@ ${errLog}`;
     }
 
     this.checkpointManager = new CheckpointManager(this.cwd, sessionId);
-    this.stepRunner = new StepRunner(this.cwd, sessionId);
+    this.stepRunner = new StepRunner(this.cwd, sessionId, this.config);
     this.sessionCost = session.totalCostEstimate || 0;
     this.totalInputTokens = session.totalInputTokens || 0;
     this.totalCacheReadTokens = session.totalCacheReadTokens || 0;
@@ -2176,7 +2366,7 @@ ${errLog}`;
       "REPL Interactive Shell Started",
     );
     this.checkpointManager = new CheckpointManager(this.cwd, session.id);
-    this.stepRunner = new StepRunner(this.cwd, session.id);
+    this.stepRunner = new StepRunner(this.cwd, session.id, this.config);
     this.sessionCost = 0;
     this.totalInputTokens = 0;
     this.totalCacheReadTokens = 0;
@@ -2418,15 +2608,25 @@ ${errLog}`;
       for (const block of msg.content) {
         if (block.type === "tool_result") {
           const tr = (block as any).toolResult;
-          if (tr && typeof tr.content === "string" && tr.content.length > maxToolResultLen) {
-            tr.content = tr.content.substring(0, maxToolResultLen) + "\n... [truncated]";
+          if (
+            tr &&
+            typeof tr.content === "string" &&
+            tr.content.length > maxToolResultLen
+          ) {
+            tr.content =
+              tr.content.substring(0, maxToolResultLen) + "\n... [truncated]";
             truncatedCount++;
           }
         }
         if (block.type === "text" && msg.role === "tool") {
           const textBlock = block as any;
-          if (typeof textBlock.text === "string" && textBlock.text.length > maxToolResultLen) {
-            textBlock.text = textBlock.text.substring(0, maxToolResultLen) + "\n... [truncated]";
+          if (
+            typeof textBlock.text === "string" &&
+            textBlock.text.length > maxToolResultLen
+          ) {
+            textBlock.text =
+              textBlock.text.substring(0, maxToolResultLen) +
+              "\n... [truncated]";
             truncatedCount++;
           }
         }
@@ -2450,7 +2650,10 @@ ${errLog}`;
           continue;
         }
         const prevMsg = history[cutIdx - 1];
-        if (prevMsg.role === "assistant" && prevMsg.content.some((c: any) => c.type === "tool_call")) {
+        if (
+          prevMsg.role === "assistant" &&
+          prevMsg.content.some((c: any) => c.type === "tool_call")
+        ) {
           cutIdx--;
           continue;
         }
@@ -2633,36 +2836,153 @@ ${errLog}`;
       this.primedCacheSlabs.add(slab.hash);
       return { primed: false };
     }
+    if (this.pendingCacheSlabs.has(slab.hash)) {
+      return { primed: false };
+    }
 
     const rounds = DEEPSEEK_CACHE_PRIMER_ROUNDS;
-    this.interaction.showText(
-      `● Priming DeepSeek cache slab ${slab.hash.slice(0, 8)} (${slab.tokenEstimate} tokens, ${rounds} rounds)...`,
+    const latencyBudgetMs = this.getDeepSeekCachePrimerLatencyBudgetMs(
+      model,
+      slab,
     );
-    const primed = await this.runDeepSeekCachePrimers(model, slab, rounds);
-    if (primed) {
-      PromptCacheSlabBuilder.markPrimed(slab);
-      this.primedCacheSlabs.add(slab.hash);
-      eventBus.emitEvent("cache_update", {
-        slabHash: slab.hash,
-        slabTokenEstimate: slab.tokenEstimate,
-        primed: true,
-        hitTokens: 0,
-        missTokens: 0,
-        inputTokens: 0,
-        hitRate: 0,
-        degraded: false,
-      });
+    if (latencyBudgetMs <= 0) {
+      return { primed: false };
     }
-    return { primed };
+
+    if (this.shouldShowDeepSeekCacheStatus()) {
+      this.interaction.showText(
+        `● Priming DeepSeek cache slab ${slab.hash.slice(0, 8)} (${slab.tokenEstimate} tokens, ${rounds} rounds)...`,
+      );
+    }
+
+    this.pendingCacheSlabs.add(slab.hash);
+    const primerAbortController = new AbortController();
+    const primer = this.runDeepSeekCachePrimers(
+      model,
+      slab,
+      rounds,
+      primerAbortController.signal,
+    );
+    const result = await this.waitForDeepSeekCachePrimer(
+      primer,
+      latencyBudgetMs,
+    );
+
+    if (result === "timeout") {
+      if (this.options?.detachBackgroundCachePrimer) {
+        primerAbortController.abort();
+        this.pendingCacheSlabs.delete(slab.hash);
+        void primer.catch(() => {});
+        return { primed: false };
+      }
+
+      void primer
+        .then((primed) => {
+          this.completeDeepSeekCachePrimer(slab, primed);
+        })
+        .catch(() => {
+          this.pendingCacheSlabs.delete(slab.hash);
+        });
+      return { primed: false };
+    }
+
+    this.completeDeepSeekCachePrimer(slab, result);
+    return { primed: result };
+  }
+
+  private async waitForDeepSeekCachePrimer(
+    primer: Promise<boolean>,
+    budgetMs: number,
+  ): Promise<boolean | "timeout"> {
+    if (!Number.isFinite(budgetMs)) {
+      return await primer;
+    }
+
+    let timeoutId: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race<boolean | "timeout">([
+        primer,
+        new Promise<"timeout">((resolve) => {
+          timeoutId = setTimeout(() => resolve("timeout"), budgetMs);
+          timeoutId.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
+  private getDeepSeekCachePrimerLatencyBudgetMs(
+    model: string,
+    slab: PromptCacheSlab,
+  ): number {
+    if (this.options?.detachBackgroundCachePrimer) {
+      return 0;
+    }
+
+    const explicitBudget = Number(
+      process.env.ORBIT_DEEPSEEK_CACHE_PRIMER_BUDGET_MS,
+    );
+    if (Number.isFinite(explicitBudget) && explicitBudget >= 0) {
+      return explicitBudget;
+    }
+
+    const modelName = model.toLowerCase();
+    if (modelName.includes("flash")) {
+      return DEEPSEEK_FLASH_CACHE_PRIMER_LATENCY_BUDGET_MS;
+    }
+
+    if (
+      modelName.includes("pro") ||
+      modelName.includes("reasoner") ||
+      modelName.includes("r1")
+    ) {
+      return DEEPSEEK_REASONING_CACHE_PRIMER_LATENCY_BUDGET_MS;
+    }
+
+    if (slab.tokenEstimate < 512) {
+      return DEEPSEEK_FLASH_CACHE_PRIMER_LATENCY_BUDGET_MS;
+    }
+
+    return DEEPSEEK_REASONING_CACHE_PRIMER_LATENCY_BUDGET_MS;
+  }
+
+  private completeDeepSeekCachePrimer(
+    slab: PromptCacheSlab,
+    primed: boolean,
+  ): void {
+    this.pendingCacheSlabs.delete(slab.hash);
+    if (!primed || this.primedCacheSlabs.has(slab.hash)) {
+      return;
+    }
+
+    PromptCacheSlabBuilder.markPrimed(slab);
+    this.primedCacheSlabs.add(slab.hash);
+    eventBus.emitEvent("cache_update", {
+      slabHash: slab.hash,
+      slabTokenEstimate: slab.tokenEstimate,
+      primed: true,
+      hitTokens: 0,
+      missTokens: 0,
+      inputTokens: 0,
+      hitRate: 0,
+      degraded: false,
+    });
   }
 
   private async runDeepSeekCachePrimers(
     model: string,
     slab: PromptCacheSlab,
     rounds: number,
+    abortSignal?: AbortSignal,
   ): Promise<boolean> {
     try {
       for (let round = 0; round < rounds; round++) {
+        if (abortSignal?.aborted) {
+          return false;
+        }
         const primerText = round % 2 === 0 ? "0" : "1";
         const primerStream = this.provider.chat({
           model,
@@ -2683,6 +3003,7 @@ ${errLog}`;
           tools: [],
           stream: false,
           maxTokens: 1,
+          abortSignal,
         });
 
         for await (const event of primerStream) {
@@ -2700,6 +3021,17 @@ ${errLog}`;
       );
       return false;
     }
+  }
+
+  private shouldShowDeepSeekCacheStatus(inputTokens = 0, hitRate = 1): boolean {
+    const verbose = process.env[DEEPSEEK_VERBOSE_CACHE_ENV];
+    if (verbose === "1" || verbose?.toLowerCase() === "true") {
+      return true;
+    }
+    if (verbose === "0" || verbose?.toLowerCase() === "false") {
+      return false;
+    }
+    return inputTokens >= 4096 && hitRate < 0.5;
   }
 
   private emitCacheTelemetry(
@@ -2736,12 +3068,14 @@ ${errLog}`;
     });
 
     if (degraded) {
-      this.interaction.showText(
-        picocolors.yellow(
-          `⚠ DeepSeek cache hit degraded for slab ${slab.hash.slice(0, 8)}: ${(hitRate * 100).toFixed(0)}% hit (${hitTokens}/${inputTokens} tokens).`,
-        ),
-      );
-      if (!primed) {
+      if (this.shouldShowDeepSeekCacheStatus(inputTokens, hitRate)) {
+        this.interaction.showText(
+          picocolors.yellow(
+            `⚠ DeepSeek cache hit degraded for slab ${slab.hash.slice(0, 8)}: ${(hitRate * 100).toFixed(0)}% hit (${hitTokens}/${inputTokens} tokens).`,
+          ),
+        );
+      }
+      if (!primed && !this.pendingCacheSlabs.has(slab.hash)) {
         void this.repairDeepSeekCache(model, slab);
       }
     }
@@ -2752,18 +3086,23 @@ ${errLog}`;
     slab: PromptCacheSlab,
   ): Promise<void> {
     if (!this.isDeepSeekCacheProvider(model)) return;
+    if (
+      this.primedCacheSlabs.has(slab.hash) ||
+      this.pendingCacheSlabs.has(slab.hash)
+    ) {
+      return;
+    }
+    this.pendingCacheSlabs.add(slab.hash);
     try {
       const primed = await this.runDeepSeekCachePrimers(
         model,
         slab,
         DEEPSEEK_CACHE_PRIMER_ROUNDS,
       );
-      if (primed) {
-        PromptCacheSlabBuilder.markPrimed(slab);
-        this.primedCacheSlabs.add(slab.hash);
-      }
+      this.completeDeepSeekCachePrimer(slab, primed);
     } catch {
       // Background cache repair must never affect the visible answer.
+      this.pendingCacheSlabs.delete(slab.hash);
     }
   }
 

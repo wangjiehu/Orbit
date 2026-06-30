@@ -3,6 +3,7 @@ import {
   ModelChatInput,
   ModelEvent,
   ModelCapabilities,
+  ProviderRuntimeOptions,
 } from "../types.js";
 import { zodToJsonSchema, fetchWithRetry } from "../utils.js";
 
@@ -21,40 +22,153 @@ export class DeepSeekAnthropicProvider implements ModelProvider {
   constructor(
     private apiKey?: string,
     private baseUrl = "https://api.deepseek.com/anthropic",
+    private options: ProviderRuntimeOptions = {},
   ) {
-    this.preheat();
+    if (options.id) {
+      this.id = options.id;
+    }
+    if (!options.disablePreheat) {
+      this.preheat();
+    }
   }
 
   private preheat() {
     try {
       if (this.baseUrl && typeof fetch === "function") {
-        fetch(this.baseUrl, { method: "HEAD" }).catch(() => {});
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 1000);
+        timeout.unref?.();
+        fetch(this.baseUrl, { method: "HEAD", signal: controller.signal })
+          .catch(() => {})
+          .finally(() => clearTimeout(timeout));
       }
     } catch {
       // Ignored
     }
   }
 
+  private getDefaultApiKeyEnv(): string {
+    if (this.options.apiKeyEnv) {
+      return this.options.apiKeyEnv;
+    }
+    if (this.type === "anthropic" || this.id === "anthropic") {
+      return "ANTHROPIC_API_KEY";
+    }
+    return "ANTHROPIC_AUTH_TOKEN";
+  }
+
+  private resolveApiKey(): string | undefined {
+    return (
+      this.apiKey ||
+      (this.options.apiKeyEnv
+        ? process.env[this.options.apiKeyEnv]
+        : undefined) ||
+      process.env[this.getDefaultApiKeyEnv()]
+    );
+  }
+
+  private getEndpointUrl(path: string): string {
+    const base = this.baseUrl.endsWith("/")
+      ? this.baseUrl.slice(0, -1)
+      : this.baseUrl;
+    if (base.endsWith("/v1") && path.startsWith("/v1/")) {
+      return `${base}${path.substring(3)}`;
+    }
+    return `${base}${path}`;
+  }
+
+  private buildJsonHeaders(key: string): Record<string, string> {
+    const authHeader = this.options.apiKeyHeader || "x-api-key";
+    const prefix = this.options.apiKeyPrefix ?? "";
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "anthropic-version": "2023-06-01",
+      [authHeader]: prefix
+        ? `${prefix}${prefix.endsWith(" ") ? "" : " "}${key}`
+        : key,
+    };
+    return { ...headers, ...(this.options.headers || {}) };
+  }
+
+  private getModelCapabilityOverride(
+    model: string,
+  ): Partial<ModelCapabilities> | undefined {
+    const overrides = this.options.modelCapabilities || {};
+    const normalizedModel = model.toLowerCase();
+    for (const [pattern, caps] of Object.entries(overrides)) {
+      const normalizedPattern = pattern.toLowerCase();
+      if (normalizedPattern === normalizedModel) {
+        return caps;
+      }
+      if (
+        normalizedPattern.includes("*") &&
+        this.matchesWildcard(normalizedModel, normalizedPattern)
+      ) {
+        return caps;
+      }
+    }
+    return undefined;
+  }
+
+  private matchesWildcard(value: string, pattern: string): boolean {
+    const escaped = pattern
+      .split("*")
+      .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+      .join(".*");
+    return new RegExp(`^${escaped}$`).test(value);
+  }
+
+  private supportsAdaptiveThinking(model: string): boolean {
+    const lowercase = model.toLowerCase();
+    return (
+      lowercase.includes("claude-fable-5") ||
+      lowercase.includes("claude-mythos-5") ||
+      lowercase.includes("claude-mythos-preview") ||
+      lowercase.includes("claude-opus-4-8") ||
+      lowercase.includes("claude-opus-4-7") ||
+      lowercase.includes("claude-opus-4-6") ||
+      lowercase.includes("claude-sonnet-4-6")
+    );
+  }
+
+  private getAdaptiveThinkingEffort(budgetTokens = 4096): string {
+    if (budgetTokens >= 8192) return "max";
+    if (budgetTokens >= 4096) return "high";
+    if (budgetTokens >= 1500) return "medium";
+    return "low";
+  }
+
   public getModelCapabilities(model: string): ModelCapabilities {
     const lowercase = model.toLowerCase();
     const isClaude = lowercase.includes("claude");
-    return {
+    const inferred: ModelCapabilities = {
       streaming: true,
       toolCalls: true,
       jsonMode: true,
-      thinking: lowercase.includes("thinking") || lowercase.includes("sonnet-3-7"),
+      thinking:
+        this.supportsAdaptiveThinking(model) ||
+        lowercase.includes("thinking") ||
+        lowercase.includes("sonnet-3-7") ||
+        lowercase.includes("sonnet-4") ||
+        lowercase.includes("opus-4"),
       vision: isClaude,
       promptCaching: true,
+    };
+    return {
+      ...inferred,
+      ...(this.options.capabilities || {}),
+      ...(this.getModelCapabilityOverride(model) || {}),
     };
   }
 
   async *chat(input: ModelChatInput): AsyncIterable<ModelEvent> {
-    const key = this.apiKey || process.env.ANTHROPIC_AUTH_TOKEN;
+    const key = this.resolveApiKey();
     if (!key) {
+      const keyEnv = this.getDefaultApiKeyEnv();
       yield {
         type: "error",
         error: new Error(
-          "API key missing for deepseek-anthropic provider. Please set ANTHROPIC_AUTH_TOKEN.",
+          `API key missing for ${this.id} provider. Please set ${keyEnv}.`,
         ),
       };
       return;
@@ -114,16 +228,24 @@ export class DeepSeekAnthropicProvider implements ModelProvider {
       };
     });
 
-    // Split system prompt at CACHE_BOUNDARY marker for optimal cache breakpoints.
+    // Split system prompt at Orbit's volatile marker for optimal cache breakpoints.
     // Layer 1 (stable prefix): core rules + tool schemas + repo map → cached across turns
     // Layer 2 (dynamic suffix): RAG context + file excerpts → changes per turn
-    const CACHE_BOUNDARY = "\n<!-- CACHE_BOUNDARY -->";
+    const cacheBoundaryMarkers = [
+      "\n<!-- VOLATILE_CONTEXT -->",
+      "\n<!-- CACHE_BOUNDARY -->",
+    ];
+    const cacheBoundary = systemPrompt
+      ? cacheBoundaryMarkers.find((marker) => systemPrompt.includes(marker))
+      : undefined;
     let systemParam: any[] | undefined;
 
-    if (systemPrompt && systemPrompt.includes(CACHE_BOUNDARY)) {
-      const splitIdx = systemPrompt.indexOf(CACHE_BOUNDARY);
+    if (systemPrompt && cacheBoundary) {
+      const splitIdx = systemPrompt.indexOf(cacheBoundary);
       const stablePrefix = systemPrompt.substring(0, splitIdx);
-      const dynamicSuffix = systemPrompt.substring(splitIdx + CACHE_BOUNDARY.length);
+      const dynamicSuffix = systemPrompt.substring(
+        splitIdx + cacheBoundary.length,
+      );
 
       systemParam = [
         {
@@ -160,7 +282,9 @@ export class DeepSeekAnthropicProvider implements ModelProvider {
       messages: anthropicMessages,
       max_tokens: input.maxTokens || 4000,
       system: systemParam,
-      stream: input.stream !== false,
+      stream:
+        input.stream !== false &&
+        this.getModelCapabilities(input.model).streaming,
     };
 
     if (input.userId) {
@@ -172,11 +296,25 @@ export class DeepSeekAnthropicProvider implements ModelProvider {
     }
 
     if (input.thinking?.enabled) {
-      body.thinking = {
-        type: "enabled",
-        budget_tokens: input.thinking.budgetTokens || 1024,
-      };
-      body.temperature = 1.0;
+      if (this.supportsAdaptiveThinking(input.model)) {
+        body.thinking = {
+          type: "adaptive",
+          display: "summarized",
+        };
+        body.output_config = {
+          ...(body.output_config || {}),
+          effort: this.getAdaptiveThinkingEffort(input.thinking.budgetTokens),
+        };
+      } else {
+        body.thinking = {
+          type: "enabled",
+          budget_tokens: input.thinking.budgetTokens || 1024,
+        };
+        body.temperature = 1.0;
+      }
+    }
+    if (this.options.extraBody) {
+      Object.assign(body, this.options.extraBody);
     }
 
     const chatController = new AbortController();
@@ -188,22 +326,34 @@ export class DeepSeekAnthropicProvider implements ModelProvider {
 
     if (input.abortSignal) {
       if (input.abortSignal.aborted) {
-        throw input.abortSignal.reason || new DOMException("The user aborted a request.", "AbortError");
+        throw (
+          input.abortSignal.reason ||
+          new DOMException("The user aborted a request.", "AbortError")
+        );
       }
       input.abortSignal.addEventListener("abort", onExternalAbort);
     }
 
-    const response = await fetchWithRetry(`${this.baseUrl}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify(body),
-      signal: chatSignal,
-      keepalive: true,
-    });
+    let response: Response;
+    try {
+      response = await fetchWithRetry(
+        this.getEndpointUrl("/v1/messages"),
+        {
+          method: "POST",
+          headers: this.buildJsonHeaders(key),
+          body: JSON.stringify(body),
+          signal: chatSignal,
+          timeout: this.options.requestTimeoutMs,
+        },
+        this.options.maxRetries ?? 2,
+      );
+    } catch (err) {
+      if (input.abortSignal) {
+        input.abortSignal.removeEventListener("abort", onExternalAbort);
+      }
+      yield { type: "error", error: err };
+      return;
+    }
 
     if (!response.ok) {
       const errText = await response.text();
@@ -211,6 +361,9 @@ export class DeepSeekAnthropicProvider implements ModelProvider {
         type: "error",
         error: new Error(`HTTP ${response.status}: ${errText}`),
       };
+      if (input.abortSignal) {
+        input.abortSignal.removeEventListener("abort", onExternalAbort);
+      }
       return;
     }
 
@@ -272,12 +425,17 @@ export class DeepSeekAnthropicProvider implements ModelProvider {
     let cacheMissTokens = 0;
 
     let streamTimeoutId: NodeJS.Timeout | undefined;
-    const streamTimeoutMs = 60000;
+    const streamTimeoutMs = this.options.streamTimeoutMs ?? 60000;
 
     const resetStreamTimeout = () => {
       if (streamTimeoutId) clearTimeout(streamTimeoutId);
       streamTimeoutId = setTimeout(() => {
-        chatController.abort(new DOMException("Stream reading timed out after 60 seconds of inactivity.", "TimeoutError"));
+        chatController.abort(
+          new DOMException(
+            `Stream reading timed out after ${Math.round(streamTimeoutMs / 1000)} seconds of inactivity.`,
+            "TimeoutError",
+          ),
+        );
       }, streamTimeoutMs);
     };
 
@@ -302,8 +460,8 @@ export class DeepSeekAnthropicProvider implements ModelProvider {
           const trimmed = line.trim();
           if (!trimmed) continue;
 
-          if (trimmed.startsWith("data: ")) {
-            const rawData = trimmed.substring(6);
+          if (trimmed.startsWith("data:")) {
+            const rawData = trimmed.substring(5).trimStart();
             if (rawData === "[DONE]") continue;
             try {
               const parsed = JSON.parse(rawData);

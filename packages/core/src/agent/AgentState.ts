@@ -13,6 +13,7 @@ export interface AgentState {
 export function createInitialState(
   sessionId: string,
   task: string,
+  maxAttempts = 8,
 ): AgentState {
   return {
     sessionId,
@@ -21,6 +22,6 @@ export function createInitialState(
     relevantFiles: [],
     done: false,
     attemptCount: 0,
-    maxAttempts: 3,
+    maxAttempts,
   };
 }

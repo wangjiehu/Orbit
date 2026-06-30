@@ -66,7 +66,7 @@ export class StatusBar {
     if (!this.isActive) return;
     const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
     const spinner = this.spinnerFrames[this.spinnerFrame];
-    const statusLine = `\r${picocolors.cyan(spinner)} ${this.message} (${elapsed}s)`;
+    const statusLine = `\r\x1b[K${picocolors.cyan(spinner)} ${this.message} (${elapsed}s)`;
     this.originalWrite(statusLine);
   }
 

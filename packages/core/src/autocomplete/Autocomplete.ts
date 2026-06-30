@@ -21,16 +21,30 @@ function getAutocompleteProvider(providerId: string, config: any) {
       ? process.env[providerConfig.apiKeyEnv]
       : undefined);
   const baseUrl = providerConfig.baseUrl;
+  const providerOptions = {
+    id: providerId,
+    apiKeyEnv: providerConfig.apiKeyEnv,
+    apiKeyHeader: providerConfig.apiKeyHeader,
+    apiKeyPrefix: providerConfig.apiKeyPrefix,
+    headers: providerConfig.headers,
+    requestTimeoutMs: providerConfig.requestTimeoutMs,
+    streamTimeoutMs: providerConfig.streamTimeoutMs,
+    maxRetries: providerConfig.maxRetries,
+    disablePreheat: providerConfig.disablePreheat,
+    extraBody: providerConfig.extraBody,
+    capabilities: providerConfig.capabilities,
+    modelCapabilities: providerConfig.modelCapabilities,
+  };
 
   switch (providerConfig.type) {
     case "openai":
-      return new OpenAIProvider(apiKey, baseUrl);
+      return new OpenAIProvider(apiKey, baseUrl, providerOptions);
     case "ollama":
       return new OllamaProvider(baseUrl);
     case "openai-compatible":
     case "anthropic-compatible":
     default:
-      return new DeepSeekOpenAIProvider(apiKey, baseUrl);
+      return new DeepSeekOpenAIProvider(apiKey, baseUrl, providerOptions);
   }
 }
 
@@ -104,9 +118,22 @@ export class AutocompleteEngine {
     const providerConfig = config.providers?.[providerId];
     const key = JSON.stringify({
       providerId,
-      apiKey: providerConfig?.apiKey || (providerConfig?.apiKeyEnv ? process.env[providerConfig.apiKeyEnv] : undefined),
+      apiKey:
+        providerConfig?.apiKey ||
+        (providerConfig?.apiKeyEnv
+          ? process.env[providerConfig.apiKeyEnv]
+          : undefined),
       baseUrl: providerConfig?.baseUrl,
-      type: providerConfig?.type
+      type: providerConfig?.type,
+      apiKeyHeader: providerConfig?.apiKeyHeader,
+      apiKeyPrefix: providerConfig?.apiKeyPrefix,
+      headers: providerConfig?.headers,
+      requestTimeoutMs: providerConfig?.requestTimeoutMs,
+      streamTimeoutMs: providerConfig?.streamTimeoutMs,
+      maxRetries: providerConfig?.maxRetries,
+      extraBody: providerConfig?.extraBody,
+      capabilities: providerConfig?.capabilities,
+      modelCapabilities: providerConfig?.modelCapabilities,
     });
     if (!this.providerCache.has(key)) {
       this.providerCache.set(key, getAutocompleteProvider(providerId, config));
@@ -148,7 +175,10 @@ export class AutocompleteEngine {
     this.activeRequests.set(windowId, controller);
     const signal = controller.signal;
 
-    const debounceMs = config.autocomplete?.debounceMs !== undefined ? config.autocomplete.debounceMs : 150;
+    const debounceMs =
+      config.autocomplete?.debounceMs !== undefined
+        ? config.autocomplete.debounceMs
+        : 150;
 
     return new Promise<string>((resolve) => {
       this.debounceResolvers.set(windowId, resolve);
@@ -175,7 +205,11 @@ export class AutocompleteEngine {
           const enhancedPrefix = header ? header + prefix : prefix;
 
           // Detect if this is the official DeepSeek API
-          const isOfficialDeepSeek = providerId === "deepseek-openai" || (config.providers?.[providerId]?.baseUrl || "").includes("api.deepseek.com");
+          const isOfficialDeepSeek =
+            providerId === "deepseek-openai" ||
+            (config.providers?.[providerId]?.baseUrl || "").includes(
+              "api.deepseek.com",
+            );
 
           // Detect and format FIM Prompt template based on the model name
           let fimPrompt = "";
@@ -215,29 +249,43 @@ export class AutocompleteEngine {
           let localPromise: Promise<string> = Promise.resolve("");
           let cloudPromise: Promise<string> = Promise.resolve("");
 
-          const speculativeEnabled = config.autocomplete.speculative?.enabled === true;
+          const speculativeEnabled =
+            config.autocomplete.speculative?.enabled === true;
           if (speculativeEnabled) {
-            const specProviderId = config.autocomplete.speculative.provider || "ollama";
-            const specModelName = config.autocomplete.speculative.model || "qwen2.5-coder:0.5b";
-            const isSpecOfficialDeepSeek = specProviderId === "deepseek-openai" || (config.providers?.[specProviderId]?.baseUrl || "").includes("api.deepseek.com");
+            const specProviderId =
+              config.autocomplete.speculative.provider || "ollama";
+            const specModelName =
+              config.autocomplete.speculative.model || "qwen2.5-coder:0.5b";
+            const isSpecOfficialDeepSeek =
+              specProviderId === "deepseek-openai" ||
+              (config.providers?.[specProviderId]?.baseUrl || "").includes(
+                "api.deepseek.com",
+              );
             try {
-              const specProvider = this.getCachedProvider(specProviderId, config);
+              const specProvider = this.getCachedProvider(
+                specProviderId,
+                config,
+              );
               if (typeof specProvider.complete === "function") {
                 if (isSpecOfficialDeepSeek) {
-                  localPromise = specProvider.complete(enhancedPrefix, {
-                    model: specModelName,
-                    maxTokens: 32,
-                    stop: stopWords,
-                    suffix: suffix,
-                    abortSignal: signal,
-                  }).catch(() => "");
+                  localPromise = specProvider
+                    .complete(enhancedPrefix, {
+                      model: specModelName,
+                      maxTokens: 32,
+                      stop: stopWords,
+                      suffix: suffix,
+                      abortSignal: signal,
+                    })
+                    .catch(() => "");
                 } else {
-                  localPromise = specProvider.complete(fimPrompt, {
-                    model: specModelName,
-                    maxTokens: 32,
-                    stop: stopWords,
-                    abortSignal: signal,
-                  }).catch(() => "");
+                  localPromise = specProvider
+                    .complete(fimPrompt, {
+                      model: specModelName,
+                      maxTokens: 32,
+                      stop: stopWords,
+                      abortSignal: signal,
+                    })
+                    .catch(() => "");
                 }
               }
             } catch {
@@ -263,10 +311,13 @@ export class AutocompleteEngine {
           }
 
           if (speculativeEnabled) {
-            const specTimeout = config.autocomplete.speculative.timeoutMs !== undefined
-              ? config.autocomplete.speculative.timeoutMs
-              : 150;
-            const timeoutPromise = new Promise<string>((r) => setTimeout(() => r("__TIMEOUT__"), specTimeout));
+            const specTimeout =
+              config.autocomplete.speculative.timeoutMs !== undefined
+                ? config.autocomplete.speculative.timeoutMs
+                : 150;
+            const timeoutPromise = new Promise<string>((r) =>
+              setTimeout(() => r("__TIMEOUT__"), specTimeout),
+            );
             const winner = await Promise.race([
               cloudPromise.catch(() => ""),
               timeoutPromise,

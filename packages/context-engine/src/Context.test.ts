@@ -34,4 +34,34 @@ describe("ContextPackBuilder tests", () => {
     expect(pack.relevantFiles[0].path).toBe("src.js");
     expect(pack.relevantFiles[0].excerpt).toContain('console.log("hello");');
   });
+
+  it("should index skills and load matching skill instructions on demand", async () => {
+    const skillDir = join(tempDir, ".orbit", "skills", "api-tuning");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(tempDir, "orbit.config.yaml"),
+      "skills:\n  directories:\n    - .orbit/skills\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      [
+        "---",
+        "name: api-tuning",
+        "description: Optimize OpenAI compatible provider throughput",
+        "---",
+        "",
+        "Use streaming and short retry backoff for API gateways.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const builder = new ContextPackBuilder(tempDir);
+    const pack = await builder.build([], "please use $api-tuning");
+
+    expect(pack.skillsIndex?.map((skill) => skill.name)).toContain(
+      "api-tuning",
+    );
+    expect(pack.activeSkills?.[0].content).toContain("short retry backoff");
+  });
 });

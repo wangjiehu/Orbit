@@ -1,6 +1,4 @@
-import {
-  ConfigLoader,
-} from "@orbit-build/config";
+import { ConfigLoader } from "@orbit-build/config";
 import {
   AgentLoop,
   UserInteraction,
@@ -26,11 +24,7 @@ import {
 } from "../tui/FullscreenTui.js";
 import { ReplController } from "../runtime/ReplController.js";
 
-export {
-  previousCodePointIndex,
-  nextCodePointIndex,
-  parseMouseWheelDirection,
-};
+export { previousCodePointIndex, nextCodePointIndex, parseMouseWheelDirection };
 
 interface LocalState {
   lastSessionId?: string;
@@ -75,10 +69,16 @@ export async function runAgent(
 
   if (config.models) {
     if (config.models.default) {
-      config.models.default = config.models.default.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+      config.models.default = config.models.default.replace(
+        /\x1b\[[0-9;]*[a-zA-Z]/g,
+        "",
+      );
     }
     if (config.models.fast) {
-      config.models.fast = config.models.fast.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+      config.models.fast = config.models.fast.replace(
+        /\x1b\[[0-9;]*[a-zA-Z]/g,
+        "",
+      );
     }
   }
 
@@ -94,20 +94,44 @@ export async function runAgent(
   }
 
   let providerInstance: any;
+  const providerOptions = {
+    id: providerName,
+    apiKeyEnv: pConfig.apiKeyEnv,
+    apiKeyHeader: pConfig.apiKeyHeader,
+    apiKeyPrefix: pConfig.apiKeyPrefix,
+    headers: pConfig.headers,
+    requestTimeoutMs: pConfig.requestTimeoutMs,
+    streamTimeoutMs: pConfig.streamTimeoutMs,
+    maxRetries: pConfig.maxRetries,
+    disablePreheat: pConfig.disablePreheat,
+    extraBody: pConfig.extraBody,
+    capabilities: pConfig.capabilities,
+    modelCapabilities: pConfig.modelCapabilities,
+  };
   if (pConfig.type === "anthropic-compatible") {
     providerInstance = new DeepSeekAnthropicProvider(
       pConfig.apiKey,
       pConfig.baseUrl,
+      providerOptions,
     );
   } else if (pConfig.type === "openai-compatible") {
     providerInstance = new DeepSeekOpenAIProvider(
       pConfig.apiKey,
       pConfig.baseUrl,
+      providerOptions,
     );
   } else if (pConfig.type === "openai") {
-    providerInstance = new OpenAIProvider(pConfig.apiKey, pConfig.baseUrl);
+    providerInstance = new OpenAIProvider(
+      pConfig.apiKey,
+      pConfig.baseUrl,
+      providerOptions,
+    );
   } else if (pConfig.type === "anthropic") {
-    providerInstance = new AnthropicProvider(pConfig.apiKey, pConfig.baseUrl);
+    providerInstance = new AnthropicProvider(
+      pConfig.apiKey,
+      pConfig.baseUrl,
+      providerOptions,
+    );
   } else if (pConfig.type === "ollama") {
     providerInstance = new OllamaProvider(pConfig.baseUrl);
   }
@@ -126,7 +150,9 @@ export async function runAgent(
           if (preview) {
             console.error(picocolors.gray(`Parameters: ${preview}`));
           }
-          console.error("Automatically denying action in non-interactive mode.");
+          console.error(
+            "Automatically denying action in non-interactive mode.",
+          );
           return false;
         },
         showText(text: string): void {
@@ -168,7 +194,7 @@ export async function runAgent(
       providerInstance,
       interaction,
       multi,
-      !!cliOverrides?.direct
+      !!cliOverrides?.direct,
     );
     await controller.start();
     return;
@@ -190,6 +216,10 @@ export async function runAgent(
       providerInstance,
       activeTask,
       interaction,
+      {
+        detachBackgroundCachePrimer: !!options?.nonInteractive,
+        disableStatusBar: !!options?.nonInteractive || !!options?.jsonl,
+      },
     );
     await loop.run();
   }

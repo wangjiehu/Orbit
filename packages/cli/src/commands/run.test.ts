@@ -4,7 +4,12 @@ import {
   parseMouseWheelDirection,
   previousCodePointIndex,
 } from "./run.js";
-import { selectActiveSlashSuggestion } from "../tui/FullscreenTui.js";
+import {
+  filterPromptOptionIndices,
+  findPreviousHistoryEntry,
+  rankSlashCandidates,
+  selectActiveSlashSuggestion,
+} from "../tui/FullscreenTui.js";
 
 // We can extract makeCompleter matcher logic from packages/cli/src/commands/run.ts to test it.
 // Since it's not exported, we can recreate it or mock the exact matcher implementation:
@@ -199,7 +204,11 @@ describe("REPL Autocomplete Completer Tests", () => {
         } else if (query.startsWith("--readonly ")) {
           prefix = "/add --readonly ";
           query = query.slice(11).trim();
-        } else if (query === "-r" || query === "--read-only" || query === "--readonly") {
+        } else if (
+          query === "-r" ||
+          query === "--read-only" ||
+          query === "--readonly"
+        ) {
           query = "";
           prefix = `/add ${parts[1]} `;
         }
@@ -320,5 +329,98 @@ describe("SGR mouse wheel parsing", () => {
     expect(parseMouseWheelDirection(undefined)).toBeNull();
     expect(parseMouseWheelDirection(null as any)).toBeNull();
     expect(parseMouseWheelDirection(123 as any)).toBeNull();
+  });
+});
+
+describe("prompt option filtering", () => {
+  const options = [
+    { value: "session-deepseek", label: "\x1b[32mDeepSeek Pro\x1b[0m" },
+    { value: "session-codewhale", label: "CodeWhale", hint: "cached agent" },
+    { value: "session-reasonix", label: "Reasonix", hint: "planning" },
+  ];
+
+  it("matches label, value, and hint fields", () => {
+    expect(filterPromptOptionIndices(options, "deepseek")).toEqual([0]);
+    expect(filterPromptOptionIndices(options, "codewhale cached")).toEqual([1]);
+    expect(filterPromptOptionIndices(options, "session-reasonix")).toEqual([2]);
+  });
+
+  it("returns all options for an empty query and strips ANSI codes", () => {
+    expect(filterPromptOptionIndices(options, "")).toEqual([0, 1, 2]);
+    expect(filterPromptOptionIndices(options, "\x1b[33mpro\x1b[0m")).toEqual([
+      0,
+    ]);
+  });
+});
+
+describe("slash command ranked matching", () => {
+  const candidates = [
+    "/model deepseek-v4-flash",
+    "/model deepseek-v4-pro",
+    "/model deepseek-ai/DeepSeek-V4-Flash-DSpark",
+    "/model deepseek-ai/DeepSeek-V4-Pro-DSpark",
+    "/chat switch sess_friendly-panda-102",
+  ];
+
+  it("keeps prefix matches ahead of looser matches", () => {
+    expect(rankSlashCandidates(["/model", "/mode", "/commit"], "/mo")).toEqual([
+      "/model",
+      "/mode",
+    ]);
+  });
+
+  it("keeps built-in slash commands usable without indexed candidates", () => {
+    expect(rankSlashCandidates(["/help", "/model", "/status"], "/mod")).toEqual(
+      ["/model"],
+    );
+  });
+
+  it("matches multiple unordered terms inside command candidates", () => {
+    expect(rankSlashCandidates(candidates, "/model dspark pro")[0]).toBe(
+      "/model deepseek-ai/DeepSeek-V4-Pro-DSpark",
+    );
+    expect(rankSlashCandidates(candidates, "/model flash deep")[0]).toBe(
+      "/model deepseek-v4-flash",
+    );
+  });
+
+  it("matches session fragments without requiring a strict prefix", () => {
+    expect(rankSlashCandidates(candidates, "/chat sw panda")).toEqual([
+      "/chat switch sess_friendly-panda-102",
+    ]);
+  });
+});
+
+describe("input history search", () => {
+  const history = [
+    "explain cache slabs",
+    "/model deepseek-v4-flash",
+    "optimize tui prompt",
+  ];
+
+  it("finds the previous matching entry before a start index", () => {
+    expect(
+      findPreviousHistoryEntry(history, "deepseek", history.length),
+    ).toEqual({
+      entry: "/model deepseek-v4-flash",
+      index: 1,
+    });
+  });
+
+  it("cycles through history and supports empty queries", () => {
+    expect(findPreviousHistoryEntry(history, "", history.length)).toEqual({
+      entry: "optimize tui prompt",
+      index: 2,
+    });
+    expect(findPreviousHistoryEntry(history, "prompt", 2)).toEqual({
+      entry: "optimize tui prompt",
+      index: 2,
+    });
+  });
+
+  it("returns null when no history entry matches", () => {
+    expect(
+      findPreviousHistoryEntry(history, "missing", history.length),
+    ).toBeNull();
   });
 });
