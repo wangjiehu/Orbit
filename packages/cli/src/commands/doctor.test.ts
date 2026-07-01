@@ -94,6 +94,7 @@ describe("doctor diagnostics", () => {
 
     expect(report).toContain("Orbit Diagnostics");
     expect(report).toContain("DeepSeek cache-first profile is active");
+    expect(report).toContain("Provider benchmark");
     expect(report).toContain("Realtime lookup enabled");
     expect(report).toContain("Skills:");
     expect(report).not.toContain("secret-deepseek-key");

@@ -74,10 +74,16 @@ program
   )
   .option("--model <model>", "model to benchmark")
   .option("--prompt <prompt>", "custom benchmark prompt")
+  .option("--repeat <n>", "number of benchmark samples to record")
+  .option("--max-tokens <n>", "maximum completion tokens for each sample")
+  .option("--json", "print benchmark samples as JSON")
   .action(async (options) => {
     await runBench(process.cwd(), {
       model: options.model,
       prompt: options.prompt,
+      repeat: options.repeat,
+      maxTokens: options.maxTokens,
+      json: !!options.json,
     });
   });
 

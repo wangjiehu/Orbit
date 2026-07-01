@@ -4,6 +4,7 @@ import { join } from "path";
 import picocolors from "picocolors";
 import { ConfigLoader, type OrbitConfig } from "@orbit-build/config";
 import { buildCacheDiagnostics } from "../runtime/CacheDiagnostics.js";
+import { formatProviderBenchmarkSummary } from "../runtime/ProviderBenchmarks.js";
 import {
   formatProviderProbe,
   probeProviderCapabilities,
@@ -197,6 +198,9 @@ export function buildDoctorReport(
       );
     }
   }
+  lines.push(
+    formatProviderBenchmarkSummary(cwd, defaultProvider, config.models.default),
+  );
 
   lines.push("");
   lines.push(picocolors.bold("Tools"));
