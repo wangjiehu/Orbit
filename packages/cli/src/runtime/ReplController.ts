@@ -402,17 +402,7 @@ export class ReplController {
           continue;
         }
 
-        const state = (loop as any).state;
-        state.task = trimmed;
-        state.done = false;
-        state.attemptCount = 0;
-
-        state.history.push({
-          id: `msg_user_${Date.now()}`,
-          role: "user",
-          createdAt: new Date().toISOString(),
-          content: [{ type: "text", text: trimmed }],
-        });
+        loop.prepareUserTurn(trimmed);
 
         // Auto-generate session title if it's the default title
         const activeSession = loop.sessionManager.getActiveSession();
@@ -505,15 +495,7 @@ export class ReplController {
               : `\n● Guided instruction received. Replanning execution...`,
           );
 
-          state.task = guidedTask;
-          state.done = false;
-          state.attemptCount = 0;
-          state.history.push({
-            id: `msg_user_${Date.now()}`,
-            role: "user",
-            createdAt: new Date().toISOString(),
-            content: [{ type: "text", text: guidedTask }],
-          });
+          loop.prepareUserTurn(guidedTask);
 
           tui.syncFromLoop(loop);
 

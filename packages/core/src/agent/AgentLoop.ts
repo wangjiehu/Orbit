@@ -2398,6 +2398,18 @@ ${errLog}`;
     return this.state.relevantFiles;
   }
 
+  public prepareUserTurn(task: string): void {
+    this.state.task = task;
+    this.state.done = false;
+    this.state.attemptCount = 0;
+    this.state.history.push({
+      id: `msg_user_${Date.now()}`,
+      role: "user",
+      createdAt: new Date().toISOString(),
+      content: [{ type: "text", text: task }],
+    });
+  }
+
   public addRelevantFilePublic(path: string, reason: string) {
     this.addRelevantFile(path, reason);
     this.cachedContextPack = null;

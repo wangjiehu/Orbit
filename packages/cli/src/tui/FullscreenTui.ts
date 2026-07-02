@@ -2842,6 +2842,7 @@ export class FullscreenTui {
               "/copy": "拷贝 AI 的上一条回复到系统剪贴板",
               "/run": "执行一条本机 Shell 命令，会先走权限检查",
               "/update": "检测并更新当前项目依赖",
+              "/webui": "启动并打开 Orbit 图形控制台页面",
             }
           : {
               "/help": "Display detailed help and commands reference",
@@ -2869,6 +2870,7 @@ export class FullscreenTui {
               "/copy": "Copy last assistant response to clipboard",
               "/run": "Run one local shell command after permission checks",
               "/update": "Detect and update current project dependencies",
+              "/webui": "Start and open the Orbit graphical console",
             };
 
         const maxVisible = 5;

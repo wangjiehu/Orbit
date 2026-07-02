@@ -1,4 +1,9 @@
-import { AgentLoop, UserInteraction } from "@orbit-build/core";
+import {
+  AgentLoop,
+  eventBus,
+  Orchestrator,
+  UserInteraction,
+} from "@orbit-build/core";
 import { FullscreenTui } from "../tui/FullscreenTui.js";
 import { ConfigSchema } from "@orbit-build/config";
 import { Prompt, type PromptOption } from "@orbit-build/tui";
@@ -18,8 +23,17 @@ import {
 } from "./ModelCatalog.js";
 import { createRequire } from "module";
 import { buildDoctorReport } from "../commands/doctor.js";
+import {
+  parseWebUiArgs,
+  startOrbitWebUi,
+  type WebUiSettingsPatch,
+} from "./WebUiServer.js";
 
 const require = createRequire(import.meta.url);
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-9;]*m/g, "");
+}
 
 export const BUILTIN_SLASH_COMMANDS = [
   "/help",
@@ -39,9 +53,12 @@ export const BUILTIN_SLASH_COMMANDS = [
   "/copy",
   "/run",
   "/update",
+  "/webui",
 ] as const;
 
 export class CommandRouter {
+  private webUiBusy = false;
+
   constructor(
     private cwd: string,
     private config: any,
@@ -64,6 +81,7 @@ export class CommandRouter {
     } else {
       console.log(text);
     }
+    eventBus.emitEvent("info", { message: stripAnsi(text) });
   }
 
   public async route(
@@ -239,6 +257,7 @@ export class CommandRouter {
             `  ${picocolors.green("/model")}    ${picocolors.cyan("[name]")}   - 动态查询或切换正在使用的语言大模型`,
             `  ${picocolors.green("/mode")}     ${picocolors.cyan("[mode]")}   - 切换安全确认模式 (strict, normal, auto, plan)`,
             `  ${picocolors.green("/update")}           - 检测并更新项目依赖包`,
+            `  ${picocolors.green("/webui")}    ${picocolors.cyan("[port]")}   - 启动并打开 Orbit 图形控制台`,
             "",
             picocolors.bold(picocolors.yellow("[ Git 提交 (Git) ]")),
             `  ${picocolors.green("/commit")}   ${picocolors.cyan("[msg]")}    - 暂存工作区修改并生成提交`,
@@ -267,6 +286,7 @@ export class CommandRouter {
             `  ${picocolors.green("/model")}    ${picocolors.cyan("[name]")}   - Show or switch active model`,
             `  ${picocolors.green("/mode")}     ${picocolors.cyan("[mode]")}   - Switch permission mode (strict, normal, auto, plan)`,
             `  ${picocolors.green("/update")}           - Check and update dependencies`,
+            `  ${picocolors.green("/webui")}    ${picocolors.cyan("[port]")}   - Start and open the Orbit graphical console`,
             "",
             picocolors.bold(picocolors.yellow("[ Git Version Control ]")),
             `  ${picocolors.green("/commit")}   ${picocolors.cyan("[msg]")}    - Stage files and commit with auto-generated message`,
@@ -279,6 +299,39 @@ export class CommandRouter {
         }
 
         this.printOutput(helpText);
+        return { shouldExit: false, processed: true };
+      }
+
+      if (command === "/webui") {
+        const isZh = config.language === "zh";
+        const { port, open } = parseWebUiArgs(parts.slice(1).join(" "));
+        try {
+          const handle = await startOrbitWebUi({
+            cwd,
+            config,
+            loop,
+            port,
+            open,
+            submitPrompt: (prompt) => this.submitWebPrompt(prompt),
+            updateSettings: (patch) => this.updateWebUiSettings(patch),
+          });
+          this.printOutput(
+            isZh
+              ? picocolors.green(`✔ Orbit Web UI 已启动: ${handle.url}`)
+              : picocolors.green(`✔ Orbit Web UI running: ${handle.url}`),
+          );
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.printOutput(
+            isZh
+              ? picocolors.red(
+                  `✖ 无法启动 Orbit Web UI: ${message}`,
+                )
+              : picocolors.red(
+                  `✖ Failed to start Orbit Web UI: ${message}`,
+                ),
+          );
+        }
         return { shouldExit: false, processed: true };
       }
 
@@ -2153,6 +2206,106 @@ export class CommandRouter {
     }
 
     return { shouldExit: false, processed: false };
+  }
+
+  private async submitWebPrompt(
+    prompt: string,
+  ): Promise<{ ok: boolean; message?: string }> {
+    const trimmed = prompt.trim();
+    if (!trimmed) {
+      return { ok: false, message: "Prompt is empty." };
+    }
+    if (this.webUiBusy) {
+      return {
+        ok: false,
+        message: "Orbit is already processing a Web UI request.",
+      };
+    }
+
+    this.webUiBusy = true;
+    try {
+      const routeResult = await this.route(trimmed);
+      if (routeResult.processed) {
+        return { ok: true };
+      }
+
+      this.loop.prepareUserTurn(trimmed);
+      this.saveLocalState({
+        lastSessionId: this.loop.getSessionId(),
+        lastModel: this.loop.getModelOverride() || this.config.models.default,
+      });
+
+      let runnable: AgentLoop | Orchestrator = this.loop;
+      if (this.multi) {
+        runnable = new Orchestrator(
+          this.cwd,
+          this.config,
+          this.providerInstance,
+          trimmed,
+          this.tuiInteraction,
+        );
+      }
+
+      this.tui.setActiveRunnable(runnable);
+      this.tui.startThinkingInput();
+      try {
+        await runnable.run();
+      } finally {
+        this.tui.stopThinkingInput();
+        this.tui.setActiveRunnable(null);
+        this.tui.syncFromLoop(this.loop);
+        this.tui.finishAttempt();
+      }
+      return { ok: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { ok: false, message };
+    } finally {
+      this.webUiBusy = false;
+    }
+  }
+
+  private async updateWebUiSettings(
+    patch: WebUiSettingsPatch,
+  ): Promise<{ ok: boolean; message?: string }> {
+    const draft = JSON.parse(JSON.stringify(this.config));
+    if (patch.permissionMode) {
+      draft.permissions.mode = patch.permissionMode;
+    }
+    if (typeof patch.webSearchEnabled === "boolean") {
+      draft.tools.webSearch.enabled = patch.webSearchEnabled;
+    }
+    if (patch.webSearchProvider) {
+      draft.tools.webSearch.provider = patch.webSearchProvider;
+    }
+    if (typeof patch.webSearchMaxResults === "number") {
+      draft.tools.webSearch.maxResults = patch.webSearchMaxResults;
+    }
+
+    const parsed = ConfigSchema.safeParse(draft);
+    if (!parsed.success) {
+      return { ok: false, message: parsed.error.message };
+    }
+
+    if (patch.model) {
+      this.loop.setModelOverride(patch.model);
+      this.saveLocalState({ lastModel: patch.model });
+    }
+    if (patch.permissionMode) {
+      this.config.permissions.mode = patch.permissionMode;
+      this.tui.setPermissionsMode(patch.permissionMode);
+    }
+    if (typeof patch.webSearchEnabled === "boolean") {
+      this.config.tools.webSearch.enabled = patch.webSearchEnabled;
+    }
+    if (patch.webSearchProvider) {
+      this.config.tools.webSearch.provider = patch.webSearchProvider;
+    }
+    if (typeof patch.webSearchMaxResults === "number") {
+      this.config.tools.webSearch.maxResults = patch.webSearchMaxResults;
+    }
+
+    return { ok: true };
   }
 
   private getNestedProperty(obj: any, path: string): any {

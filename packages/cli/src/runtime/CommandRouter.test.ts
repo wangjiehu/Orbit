@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { CommandRouter } from "./CommandRouter.js";
+import { BUILTIN_SLASH_COMMANDS, CommandRouter } from "./CommandRouter.js";
 import { Prompt } from "@orbit-build/tui";
 
 describe("CommandRouter Unit Tests", () => {
@@ -42,6 +42,10 @@ describe("CommandRouter Unit Tests", () => {
   };
 
   const localState = { lastSessionId: "123", lastModel: "gpt-4" };
+
+  it("includes the Orbit Web UI command in built-in slash commands", () => {
+    expect(BUILTIN_SLASH_COMMANDS).toContain("/webui");
+  });
 
   it("should output help message when /help is executed", async () => {
     const router = new CommandRouter(
