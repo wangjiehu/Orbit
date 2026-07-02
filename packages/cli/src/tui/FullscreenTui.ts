@@ -617,7 +617,7 @@ export class FullscreenTui {
         }
 
         const liveLookupMatch = plain.match(
-          /^✦\s*(?:✨\s*)?(web_search|weather)\b\s*(.*)$/i,
+          /^✦\s*(?:✨\s*)?(web_search)\b\s*(.*)$/i,
         );
         if (liveLookupMatch) {
           liveLookupCount += 1;

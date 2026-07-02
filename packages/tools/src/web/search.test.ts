@@ -1,6 +1,5 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { WebSearchTool } from "./search.js";
-import { WeatherTool } from "./weather.js";
 
 describe("WebSearchTool", () => {
   const originalFetch = global.fetch;
@@ -304,68 +303,6 @@ describe("WebSearchTool", () => {
     expect(String(fetchMock.mock.calls[1][0])).toContain(
       "start_date=2026-06-30",
     );
-  });
-
-  it("uses the dedicated weather tool for direct Open-Meteo lookups", async () => {
-    const fetchMock = vi.fn(async (url: string) => {
-      if (url.includes("geocoding-api.open-meteo.com")) {
-        return {
-          status: 200,
-          statusText: "OK",
-          text: async () =>
-            JSON.stringify({
-              results: [
-                {
-                  name: "杭州",
-                  admin1: "浙江省",
-                  country: "中国",
-                  latitude: 30.29365,
-                  longitude: 120.16142,
-                  timezone: "Asia/Shanghai",
-                },
-              ],
-            }),
-        } as any;
-      }
-
-      return {
-        status: 200,
-        statusText: "OK",
-        text: async () =>
-          JSON.stringify({
-            timezone: "Asia/Shanghai",
-            daily_units: {
-              temperature_2m_max: "°C",
-              temperature_2m_min: "°C",
-              precipitation_sum: "mm",
-            },
-            daily: {
-              time: ["2026-06-29"],
-              weather_code: [63],
-              temperature_2m_max: [27.4],
-              temperature_2m_min: [23.1],
-              precipitation_sum: [18.2],
-            },
-          }),
-      } as any;
-    });
-    global.fetch = fetchMock as any;
-
-    const tool = new WeatherTool();
-    const res = await tool.execute(
-      { location: "杭州", date: "2026-06-29" },
-      { cwd: process.cwd(), sessionId: "test" },
-    );
-
-    expect(res.ok).toBe(true);
-    expect(res.display).toContain("Open-Meteo");
-    expect(res.data).toContain("Source: Open-Meteo weather API");
-    expect(res.data).toContain("2026-06-29");
-    expect(res.data).toContain("中雨");
-    expect(String(fetchMock.mock.calls[0][0])).toContain(
-      "name=%E6%9D%AD%E5%B7%9E",
-    );
-    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("passes the full 20-result cap to configured search providers", async () => {

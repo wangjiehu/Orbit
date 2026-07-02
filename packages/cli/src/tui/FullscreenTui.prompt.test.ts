@@ -318,7 +318,7 @@ describe("FullscreenTui prompt interactions", () => {
     expect(plain).not.toContain("DeepSeek cache hit degraded");
   });
 
-  it("compacts weather lookup system logs in history rendering", () => {
+  it("compacts Open-Meteo web search logs in history rendering", () => {
     const tui = createTui();
 
     const lines = (tui as any).formatSystemLinesForDisplay(
@@ -326,7 +326,7 @@ describe("FullscreenTui prompt interactions", () => {
         {
           role: "system",
           text: [
-            "  ✦ weather 杭州 2026-06-30",
+            "  ✦ web_search 杭州 2026-06-30 天气",
             "  ✔ Success: Weather data returned for 杭州, 浙江省, 中国 for 2026-06-30 via Open-Meteo.",
           ].join("\n"),
         },
@@ -335,7 +335,7 @@ describe("FullscreenTui prompt interactions", () => {
     );
 
     const plain = lines.map((line: string) => stripAnsiCodes(line)).join("\n");
-    expect(plain).toContain("weather 杭州 2026-06-30 · Open-Meteo");
+    expect(plain).toContain("web_search 杭州 2026-06-30 天气 · Open-Meteo");
     expect(plain).not.toContain("Success:");
   });
 

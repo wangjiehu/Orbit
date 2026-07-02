@@ -182,11 +182,8 @@ export class AgentLoop {
     toolName: string,
     risk?: string,
   ): string | null {
-    if (
-      (toolName === "web_search" || toolName === "weather") &&
-      risk === "network"
-    ) {
-      return "network:live_lookup";
+    if (toolName === "web_search" && risk === "network") {
+      return "network:web_search";
     }
     return null;
   }
@@ -198,7 +195,7 @@ export class AgentLoop {
         : JSON.stringify(result.data)
       : result.error || "Unknown error";
 
-    if (!result.ok || (toolName !== "web_search" && toolName !== "weather")) {
+    if (!result.ok || toolName !== "web_search") {
       return content;
     }
 
@@ -652,9 +649,7 @@ export class AgentLoop {
           }
           let toolDefs = toolRegistry.getDefinitions();
           if (!this.config.tools.webSearch.enabled) {
-            toolDefs = toolDefs.filter(
-              (tool) => tool.name !== "web_search" && tool.name !== "weather",
-            );
+            toolDefs = toolDefs.filter((tool) => tool.name !== "web_search");
           }
           if (!this.config.tools.bash.enabled) {
             toolDefs = toolDefs.filter(
@@ -1111,10 +1106,6 @@ ${errLog}`;
                 argSummary = `"${parsed.pattern || parsed.Pattern}" in ${parsed.path || parsed.DirectoryPath || ""}`;
               } else if (tc.name === "web_search") {
                 argSummary = parsed.query || "";
-              } else if (tc.name === "weather") {
-                argSummary = [parsed.location, parsed.date]
-                  .filter(Boolean)
-                  .join(" ");
               } else {
                 argSummary = tc.arguments;
               }
